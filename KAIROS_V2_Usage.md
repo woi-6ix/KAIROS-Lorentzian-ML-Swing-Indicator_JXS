@@ -6,7 +6,8 @@ V2 keeps the original kernel flip, trading-session, entry slope and directional 
 
 | Control | Default |
 | --- | --- |
-| Chart | 1 minute; other chart intervals blocked unless the requirement is disabled |
+| Chart | Intraday, 1 minute or higher; 3-minute and 5-minute charts supported |
+| Continuation VP timeframe | Always 1 minute, independent of the chart interval |
 | Trading hours | 09:30 to before 15:00 America/New_York; editable |
 | Position quantity | 100 underlying shares/contracts; editable and rounded to the symbol minimum |
 | Initial capital / account currency | 100,000 USD / USD; adjustable in strategy Properties |
@@ -14,18 +15,28 @@ V2 keeps the original kernel flip, trading-session, entry slope and directional 
 | First partial | 25% of original quantity at a close of at least 0.4R |
 | Second partial | 25% of original quantity at a close of at least 0.7R |
 | Later partials | 10% of original quantity at 0.8R, 0.9R, 1.0R, etc. |
-| Continuation | Latest directional VP within 2 bars, no newer opposing VP, correct kernel color; optional slope check enabled |
+| Continuation | Latest directional 1-minute VP within 2 one-minute bars, at or after entry, no newer opposing VP, correct chart kernel color; optional chart slope check enabled |
 | Adverse-candle exit | One opposite-color candle closes the remainder; count and switch editable |
 | Maximum cash loss | Enabled, 500 USD; amount editable |
 | Cash loss display | Enabled, bottom left; separate visibility and protection switches |
 
 A long's adverse candle has close below open; a short's has close above open. Dojis reset the consecutive-adverse count. If an opposite entry qualifies on that same candle, a reversal can close the old remainder and open the new direction. Session and cash-loss exits take priority over reversals.
 
+## One-minute volume checks on higher charts
+
+On a 3-minute chart, the continuation checker uses completed 1-minute candles inside each chart candle. The existing directional Volatility Push formula, including ATR lengths, volume average, candle shape, score and push ages, is evaluated entirely in the 1-minute context. The original entry VP filter and its chart markers continue to use the chart timeframe. Both contexts share the editable Volatility Push thresholds.
+
+Freshness is counted in actual 1-minute bars, not chart bars: a setting of 2 permits a push on the latest completed minute or either of the previous two. The checker retains the ordering of pushes inside a larger candle. A newer opposing push defeats continuation even if an earlier minute in that same chart candle had a qualifying push. Pushes from before entry do not qualify the new position.
+
+Entries, kernel color, slope, adverse-candle exits and profit orders are evaluated at confirmed chart closes. A 3-minute chart therefore uses 1-minute volume information but makes its next adaptive profit decision at the 3-minute close; it does not submit a profit order every minute. The statistics row **Continuation VP · 1m** shows the latest fresh direction and age, or missing/stale data. That row describes the volume signal; continuation also requires the position-entry timestamp, kernel and enabled slope checks to pass.
+
+TradingView limits historical lower-timeframe coverage and some feeds omit inactive minutes. If no completed 1-minute intrabars are available on a higher chart, continuation fails rather than substituting the chart's volume signal. At a reached adaptive target, the remainder then closes. On a 1-minute chart the checker uses the same confirmed chart candles directly. Seconds charts and daily-or-higher charts are unsupported.
+
 ## Profit-taking semantics
 
 These are close-confirmed market exits, not resting limit orders at the target prices. A wick alone reaching a target does not trigger profit-taking. A qualifying close triggers at most one stage per bar. Execution is simulated on that closing tick, subject to TradingView's configured execution/slippage behavior.
 
-At a reached target, directional VP, kernel color and the optional continuation slope must pass to take a partial and advance to the next target. Otherwise the entire remaining position closes. If price has not reached the next target, the position continues subject to stops, adverse candles, kernel exits and session cutoff.
+At a reached target, directional 1-minute VP, chart kernel color and the optional chart continuation slope must pass to take a partial and advance to the next target. Otherwise the entire remaining position closes. If price has not reached the next target, the position continues subject to stops, adverse candles, kernel exits and session cutoff.
 
 Each slice is a percentage of ORIGINAL quantity, rounded down to a tradable unit, with a one-unit minimum. The last slice is capped at the remaining quantity. A one-share position therefore exits completely at the first stage. With the default 100 units, slices are 25, 25, then five slices of 10; the position is fully closed at the 1.2R stage if all continuation checks keep passing. Change the partial percentages to retain a runner for longer.
 
@@ -49,4 +60,4 @@ TradingView counts partial exits as closed trade portions; the table labels this
 
 ## Validation status
 
-Source checks confirmed the inherited entry calculations and filters were preserved. Numerical checks covered staged-quantity conservation, target progression, minimum tradable quantities, USD/symbol cash-stop sizing, quantity reductions, long/short symmetry and hard-exit priority. TradingView compilation, broker-emulator backtesting and live performance have not been verified here. Set realistic fees and slippage in strategy Properties before evaluating results.
+Source checks confirmed the inherited entry calculations and filters were preserved. Numerical checks covered staged-quantity conservation, target progression, minimum tradable quantities, USD/symbol cash-stop sizing, quantity reductions, long/short symmetry and hard-exit priority. The 1-minute update also checks intrabar event ordering, age in minute bars, long/short symmetry, pre-entry exclusion, completed-candle selection and missing-data handling. TradingView compilation, broker-emulator backtesting and live performance have not been verified here. Set realistic fees and slippage in strategy Properties before evaluating results.
