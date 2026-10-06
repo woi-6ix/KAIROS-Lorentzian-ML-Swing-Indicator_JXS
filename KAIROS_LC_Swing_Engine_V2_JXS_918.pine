@@ -524,7 +524,6 @@ plotshape(
 // can tighten protection without changing the definition of R.
 // ============================================================================
 string GROUP_ADAPTIVE = "V2 Adaptive Take Profit"
-bool requireOneMinute = input.bool(true, "Require 1-Minute Chart", group=GROUP_ADAPTIVE)
 bool useAdaptiveTp = input.bool(true, "Enable Adaptive Partial Profits", group=GROUP_ADAPTIVE)
 float firstTargetR = input.float(0.4, "First Target (R)", minval=0.1, step=0.1, group=GROUP_ADAPTIVE)
 float secondTargetR = input.float(0.7, "Second Target (R)", minval=0.1, step=0.1, group=GROUP_ADAPTIVE)
@@ -532,7 +531,7 @@ float targetStepR = input.float(0.1, "Later Target Increment (R)", minval=0.1, s
 float firstExitPercent = input.float(25, "First Exit (% of original quantity)", minval=1, maxval=100, group=GROUP_ADAPTIVE)
 float secondExitPercent = input.float(25, "Second Exit (% of original quantity)", minval=1, maxval=100, group=GROUP_ADAPTIVE)
 float laterExitPercent = input.float(10, "Later Exits (% of original quantity)", minval=1, maxval=100, group=GROUP_ADAPTIVE)
-int runnerPushFreshness = input.int(2, "Continuation Push Freshness (bars)", minval=0, maxval=10, group=GROUP_ADAPTIVE)
+int runnerPushFreshness = input.int(2, "Continuation Push Freshness (1-minute bars)", minval=0, maxval=10, group=GROUP_ADAPTIVE, tooltip="Continuation always evaluates the existing Volatility Push formula on 1-minute candles, including its ATR, candle and volume averages. 2 permits a push on the latest completed 1-minute bar or either of the previous two. Entries, slope, adverse candles and profit orders use the chart timeframe.")
 bool useRunnerSlopeFilter = input.bool(true, "Require Slope to Extend Target", group=GROUP_ADAPTIVE)
 bool cutOnWrongCandles = input.bool(true, "Close Remainder on Adverse Candles", group=GROUP_ADAPTIVE)
 int adverseBarsToExit = input.int(1, "Consecutive Adverse Candles", minval=1, maxval=10, group=GROUP_ADAPTIVE)
@@ -556,10 +555,38 @@ bool enableTradeAlerts = input.bool(true, "Enable Entry Fill Alerts", group=GROU
 bool enableExitAlerts = input.bool(true, "Enable Partial / Final Exit Fill Alerts", group=GROUP_TRADE_ALERTS)
 
 if barstate.isfirst
-    if requireOneMinute and not (timeframe.isminutes and timeframe.multiplier == 1)
-        runtime.error("KAIROS V2: use a 1-minute chart, or disable Require 1-Minute Chart.")
+    if not timeframe.isintraday or timeframe.in_seconds() < 60
+        runtime.error("KAIROS V2: use an intraday chart of 1 minute or higher. Continuation Volatility Push always uses 1-minute data.")
     if secondTargetR <= firstTargetR
         runtime.error("Second Target must be greater than First Target.")
+
+// FIXED 1-MINUTE CONTINUATION CONTEXT
+// request.security_lower_tf reevaluates these series AND all their dependencies
+// in the requested context. ATR, volume SMA, candle tests and bar ages therefore
+// use genuine 1-minute candles, rather than chart-timeframe values sampled down.
+// Ages are computed inside that context, preserving pushes earlier in a chart
+// candle and their ordering, including a newer opposing push.
+int bullPushCloseTime = ta.valuewhen(bullVolatilityPush, time_close, 0)
+int bearPushCloseTime = ta.valuewhen(bearVolatilityPush, time_close, 0)
+[minuteCloseTimes, minuteBullAges, minuteBearAges, minuteBullPushTimes, minuteBearPushTimes] = request.security_lower_tf(syminfo.tickerid, "1", [time_close, bullPushAge, bearPushAge, bullPushCloseTime, bearPushCloseTime], ignore_invalid_timeframe=true)
+
+bool chartIsOneMinute = timeframe.isminutes and timeframe.multiplier == 1
+bool oneMinutePushReady = chartIsOneMinute and barstate.isconfirmed
+int oneMinuteBullAge = oneMinutePushReady ? bullPushAge : 100000
+int oneMinuteBearAge = oneMinutePushReady ? bearPushAge : 100000
+int oneMinuteBullPushTime = oneMinutePushReady ? bullPushCloseTime : na
+int oneMinuteBearPushTime = oneMinutePushReady ? bearPushCloseTime : na
+// Consume only completed intrabars at a confirmed chart close. Empty arrays on
+// higher charts fail continuation; they never fall back to chart-timeframe VP.
+if not chartIsOneMinute and barstate.isconfirmed and array.size(minuteCloseTimes) > 0
+    for minuteIndex = 0 to array.size(minuteCloseTimes) - 1
+        int minuteCloseTime = array.get(minuteCloseTimes, minuteIndex)
+        if not na(minuteCloseTime) and minuteCloseTime <= time_close
+            oneMinutePushReady := true
+            oneMinuteBullAge := array.get(minuteBullAges, minuteIndex)
+            oneMinuteBearAge := array.get(minuteBearAges, minuteIndex)
+            oneMinuteBullPushTime := array.get(minuteBullPushTimes, minuteIndex)
+            oneMinuteBearPushTime := array.get(minuteBearPushTimes, minuteIndex)
 
 float riskAtr = ta.atr(riskAtrLength)
 float quantityStep = syminfo.mincontract
@@ -578,7 +605,7 @@ var float protectiveTicks = na
 var float nextTargetR = na
 var int profitStage = 0
 var int adverseCount = 0
-var int entrySignalBar = na
+var int entrySignalTime = na
 var int lastEntryBar = na
 
 int positionDirection = strategy.position_size > 0 ? 1 : strategy.position_size < 0 ? -1 : 0
@@ -613,11 +640,12 @@ if barstate.isconfirmed and remainingQuantity > 0
         strategy.close_all(comment="KAIROS V2 " + reason, immediately=true, alert_message="KAIROS V2 CLOSE REMAINDER | " + reason, disable_alert=not enableExitAlerts)
         closingRemainder := true
     else if not reversingNow
-        // Continuation must use a directional push belonging to this position.
-        int positionAge = bar_index - entrySignalBar
-        int pushAge = positionDirection == 1 ? bullPushAge : bearPushAge
-        int oppositePushAge = positionDirection == 1 ? bearPushAge : bullPushAge
-        bool volumeContinues = pushAge <= runnerPushFreshness and pushAge <= positionAge and pushAge < oppositePushAge
+        // Push freshness is measured in 1-minute bars, independent of the chart.
+        // A pre-entry push cannot qualify a new position, even if still fresh.
+        int pushAge = positionDirection == 1 ? oneMinuteBullAge : oneMinuteBearAge
+        int oppositePushAge = positionDirection == 1 ? oneMinuteBearAge : oneMinuteBullAge
+        int pushTime = positionDirection == 1 ? oneMinuteBullPushTime : oneMinuteBearPushTime
+        bool volumeContinues = oneMinutePushReady and not na(pushTime) and not na(entrySignalTime) and pushTime >= entrySignalTime and pushAge <= runnerPushFreshness and pushAge < oppositePushAge
         bool slopeContinues = not useRunnerSlopeFilter or (positionDirection == 1 ? kernelSlopeAtr >= minSlopeAtr : kernelSlopeAtr <= -minSlopeAtr)
         bool kernelContinues = positionDirection == 1 ? kernelBullish : kernelBearish
         bool continuationPass = volumeContinues and slopeContinues and kernelContinues
@@ -661,7 +689,7 @@ if barstate.isconfirmed and (canEnterLong or canEnterShort)
     nextTargetR := useAdaptiveTp ? firstTargetR : rewardRiskMultiple
     profitStage := 0
     adverseCount := 0
-    entrySignalBar := bar_index
+    entrySignalTime := time_close
     lastEntryBar := bar_index
     if canEnterLong
         strategy.entry("KAIROS V2 Long", strategy.long, qty=entryQuantity, comment="KAIROS V2 LONG", alert_message="KAIROS V2 LONG FILLED", disable_alert=not enableTradeAlerts)
@@ -729,7 +757,7 @@ color statsBorder = color.new(cGold, 70)
 var table statsTable = table.new(
      statsTablePosition,
      2,
-     12,
+     13,
      bgcolor=statsBackground,
      frame_color=color.new(cGold, 45),
      frame_width=2,
@@ -823,8 +851,12 @@ if barstate.islastconfirmedhistory or barstate.islast
         f_kairosStatsRow(statsTable, 9, "Max Drawdown", f_kairosMoney(strategy.max_drawdown), cRed, statsTextSize)
         f_kairosStatsRow(statsTable, 10, "Position", positionText, positionColor, statsTextSize)
         f_kairosStatsRow(statsTable, 11, "Target", na(nextTargetR) ? (useAdaptiveTp ? f_kairosNumber(firstTargetR) + "R start" : f_kairosNumber(rewardRiskMultiple) + "R fixed") : f_kairosNumber(nextTargetR) + "R", color.white, statsTextSize)
+        bool freshMinuteBull = oneMinutePushReady and oneMinuteBullAge <= runnerPushFreshness and oneMinuteBullAge < oneMinuteBearAge
+        bool freshMinuteBear = oneMinutePushReady and oneMinuteBearAge <= runnerPushFreshness and oneMinuteBearAge < oneMinuteBullAge
+        string minutePushText = not oneMinutePushReady ? "NO DATA" : freshMinuteBull ? "BULL · age " + str.tostring(oneMinuteBullAge) : freshMinuteBear ? "BEAR · age " + str.tostring(oneMinuteBearAge) : "NO FRESH PUSH"
+        f_kairosStatsRow(statsTable, 12, "Continuation VP · 1m", minutePushText, freshMinuteBull ? cGreen : freshMinuteBear ? cRed : cGray, statsTextSize)
     else
-        table.clear(statsTable, 0, 0, 1, 11)
+        table.clear(statsTable, 0, 0, 1, 12)
 // ============================================================================
 // ============================================================================
 // EDITABLE BOTTOM WATERMARK — BELLEROPHONTES GOLD THEME
