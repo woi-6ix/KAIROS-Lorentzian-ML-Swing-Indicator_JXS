@@ -1,0 +1,1003 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// See https://mozilla.org/MPL/2.0/
+// Kernel regression logic adapted from jdehorty's Lorentzian Classification / Kernel Functions work.
+// KAIROS strategy adaptation: JXS_918.
+// WHY KAIROS?
+// Kairos personifies the opportune moment in Greek mythology.
+// The name reflects waiting for a kernel swing signal and the enabled
+// confirmation filters to align within the selected trading session.
+//@version=6
+//@strategy_alert_message {{strategy.order.alert_message}}
+strategy(
+     title="KAIROS LC Swing Engine {JXS_918}",
+     shorttitle="KAIROS LC",
+     overlay=true,
+     pyramiding=0,
+     process_orders_on_close=true,
+     calc_on_order_fills=true,
+     precision=4,
+     max_labels_count=500
+)
+import jdehorty/KernelFunctions/2 as kernels
+
+// Naming explanation appears in settings and when hovering over the table title.
+const string KAIROS_STORY = "Kairos personifies the opportune moment in Greek mythology. This engine is named for waiting until a kernel swing signal and the enabled confirmation filters align within the selected trading session."
+bool showKairosStory = input.bool(true, "Show naming explanation in table header", group="About KAIROS", tooltip=KAIROS_STORY)
+
+// ============================================================================
+// COLORS
+// ============================================================================
+color cGreen = color.new(#00E5C3, 0)
+color cRed = color.new(#FF4D6D, 0)
+color cGray = color.new(#B0BEC5, 0)
+color cTransparent = color.new(color.black, 100)
+color cGold = #FFD700
+color cSilver = #C0C0C0
+color cNavy = #0A0E1A
+color cDarkNavy = #0F1420
+color cLabel = #B0BEC5
+// ============================================================================
+// GENERAL / DIRECTION
+// ============================================================================
+string GROUP_GENERAL = "General"
+bool enableLongs = input.bool(true, "Enable Longs", group=GROUP_GENERAL, inline="dir")
+bool enableShorts = input.bool(true, "Enable Shorts", group=GROUP_GENERAL, inline="dir")
+bool exitOnOppositeKernelFlip = input.bool(true, "Exit on Opposite Kernel Flip", group=GROUP_GENERAL)
+bool closeAtSessionEnd = input.bool(true, "Close Position at Session End", group=GROUP_GENERAL)
+// ============================================================================
+// EDITABLE NEW YORK TRADING SESSION
+// Default: 09:30 AM to 03:00 PM America/New_York.
+// Entries are based on the bar's closing timestamp.
+// ============================================================================
+string GROUP_SESSION = "Trading Session"
+string tradeTimezone = input.string("America/New_York", "Timezone", group=GROUP_SESSION)
+int startHour = input.int(
+     9,
+     "Start Hour",
+     minval=0,
+     maxval=23,
+     group=GROUP_SESSION,
+     inline="start"
+)
+int startMinute = input.int(
+     30,
+     "Minute",
+     minval=0,
+     maxval=59,
+     group=GROUP_SESSION,
+     inline="start"
+)
+int endHour = input.int(
+     15,
+     "End Hour",
+     minval=0,
+     maxval=23,
+     group=GROUP_SESSION,
+     inline="end"
+)
+int endMinute = input.int(
+     0,
+     "Minute",
+     minval=0,
+     maxval=59,
+     group=GROUP_SESSION,
+     inline="end"
+)
+int startOfDay = startHour * 60 + startMinute
+int endOfDay = endHour * 60 + endMinute
+bool sessionValid = startOfDay < endOfDay
+int barCloseMinute =
+     hour(time_close, tradeTimezone) * 60 +
+     minute(time_close, tradeTimezone)
+bool inTradingSession = (
+     timeframe.isintraday and
+     sessionValid and
+     not na(time_close) and
+     barCloseMinute >= startOfDay and
+     barCloseMinute < endOfDay
+)
+int cutoffTimestamp = timestamp(
+     tradeTimezone,
+     year(time_close, tradeTimezone),
+     month(time_close, tradeTimezone),
+     dayofmonth(time_close, tradeTimezone),
+     endHour,
+     endMinute
+)
+bool sessionCutoffBar = (
+     timeframe.isintraday and
+     sessionValid and
+     not na(time_close) and
+     time_close >= cutoffTimestamp and
+     (
+         na(time_close[1]) or
+         time_close[1] < cutoffTimestamp
+     )
+)
+// ============================================================================
+// KERNEL REGRESSION
+// The plotted green/red line is the primary KAIROS trade engine.
+// ============================================================================
+string GROUP_KERNEL = "Kernel Regression"
+float kernelSource = input.source(
+     close,
+     "Source",
+     group=GROUP_KERNEL
+)
+bool showKernel = input.bool(
+     true,
+     "Show Kernel Line",
+     group=GROUP_KERNEL,
+     inline="display"
+)
+bool useKernelSmoothing = input.bool(
+     false,
+     "Enhanced Smoothing",
+     group=GROUP_KERNEL,
+     inline="display"
+)
+int kernelLookback = input.int(
+     8,
+     "Lookback Window",
+     minval=3,
+     maxval=100,
+     group=GROUP_KERNEL
+)
+float kernelRelativeWeight = input.float(
+     8.0,
+     "Relative Weighting",
+     minval=0.25,
+     maxval=25.0,
+     step=0.25,
+     group=GROUP_KERNEL
+)
+int kernelRegressionLevel = input.int(
+     25,
+     "Regression Level",
+     minval=2,
+     maxval=100,
+     group=GROUP_KERNEL
+)
+int kernelLag = input.int(
+     5,
+     "Smoothing Lag",
+     minval=1,
+     maxval=20,
+     group=GROUP_KERNEL
+)
+float yhat1 = kernels.rationalQuadratic(
+     kernelSource,
+     kernelLookback,
+     kernelRelativeWeight,
+     kernelRegressionLevel
+)
+int gaussianLookback = math.max(
+     1,
+     kernelLookback - kernelLag
+)
+float yhat2 = kernels.gaussian(
+     kernelSource,
+     gaussianLookback,
+     kernelRegressionLevel
+)
+bool kernelBullishRate = (
+     yhat1 > yhat1[1]
+)
+bool kernelBearishRate = (
+     yhat1 < yhat1[1]
+)
+bool kernelBullishSmooth = (
+     yhat2 >= yhat1
+)
+bool kernelBearishSmooth = (
+     yhat2 <= yhat1
+)
+bool kernelBullish = (
+     useKernelSmoothing
+     ? kernelBullishSmooth
+     : kernelBullishRate
+)
+bool kernelBearish = (
+     useKernelSmoothing
+     ? kernelBearishSmooth
+     : kernelBearishRate
+)
+bool kernelBullishFlip = (
+     bar_index > 2 and
+     kernelBullish and
+     not kernelBullish[1]
+)
+bool kernelBearishFlip = (
+     bar_index > 2 and
+     kernelBearish and
+     not kernelBearish[1]
+)
+color kernelColor = (
+     kernelBullish
+     ? cGreen
+     : kernelBearish
+     ? cRed
+     : cGray
+)
+plot(
+     showKernel ? yhat1 : na,
+     title="KAIROS Kernel Regression",
+     color=kernelColor,
+     linewidth=2
+)
+// ============================================================================
+// SLOPE FILTER
+// Requires the kernel to have enough directional slope in ATR-normalized terms.
+// A value of 0.05 means the kernel moved 0.05 ATR over the chosen lookback.
+// ============================================================================
+string GROUP_SLOPE = "Slope Filter"
+bool useSlopeFilter = input.bool(
+     true,
+     "Use Slope Filter",
+     group=GROUP_SLOPE
+)
+int slopeLookbackBars = input.int(
+     2,
+     "Slope Lookback Bars",
+     minval=1,
+     maxval=20,
+     group=GROUP_SLOPE
+)
+int slopeAtrLength = input.int(
+     14,
+     "ATR Length",
+     minval=1,
+     group=GROUP_SLOPE
+)
+float minSlopeAtr = input.float(
+     0.05,
+     "Minimum Slope (ATR units)",
+     minval=0.0,
+     step=0.01,
+     group=GROUP_SLOPE
+)
+float slopeAtr = ta.atr(
+     slopeAtrLength
+)
+float kernelSlopeRaw = (
+     yhat1 -
+     yhat1[slopeLookbackBars]
+)
+float kernelSlopeAtr = (
+     slopeAtr > 0
+     ? kernelSlopeRaw / slopeAtr
+     : 0.0
+)
+bool longSlopePass = (
+     not useSlopeFilter or
+     kernelSlopeAtr >= minSlopeAtr
+)
+bool shortSlopePass = (
+     not useSlopeFilter or
+     kernelSlopeAtr <= -minSlopeAtr
+)
+// ============================================================================
+// VOLATILITY PUSH FILTER
+//
+// Volatility Score:
+//   +1 ATR expansion
+//   +1 Candle range / ATR expansion
+//   +1 Volume expansion
+//
+// Default minimum = 2 of 3.
+//
+// Direction:
+// LONG requires strong bullish push candle.
+// SHORT requires strong bearish push candle.
+// ============================================================================
+string GROUP_VP = "Volatility Push"
+bool useVolatilityPushFilter = input.bool(
+     true,
+     "Require Volatility Push",
+     group=GROUP_VP
+)
+bool showVolatilityPush = input.bool(
+     true,
+     "Show VP Markers",
+     group=GROUP_VP
+)
+int vpConfirmationWindow = input.int(
+     0,
+     "Confirmation Window (bars)",
+     minval=0,
+     maxval=10,
+     group=GROUP_VP,
+     tooltip="0 = Volatility Push must occur on the same bar as the kernel color change."
+)
+int vpFastAtrLength = input.int(
+     5,
+     "Fast ATR Length",
+     minval=1,
+     group=GROUP_VP,
+     inline="atr"
+)
+int vpSlowAtrLength = input.int(
+     20,
+     "Slow ATR Length",
+     minval=2,
+     group=GROUP_VP,
+     inline="atr"
+)
+float vpMinAtrRatio = input.float(
+     1.10,
+     "Min ATR Ratio",
+     minval=0.1,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpMinRangeAtr = input.float(
+     1.25,
+     "Min Range / ATR",
+     minval=0.1,
+     step=0.05,
+     group=GROUP_VP
+)
+int vpVolumeLength = input.int(
+     20,
+     "Volume Average Length",
+     minval=1,
+     group=GROUP_VP
+)
+float vpMinVolumeRatio = input.float(
+     1.50,
+     "Min Volume Ratio",
+     minval=0.1,
+     step=0.05,
+     group=GROUP_VP
+)
+int vpMinScore = input.int(
+     2,
+     "Minimum Volatility Score",
+     minval=1,
+     maxval=3,
+     group=GROUP_VP
+)
+float vpMinBodyAtr = input.float(
+     0.80,
+     "Min Body / ATR",
+     minval=0.0,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpMinBodyRange = input.float(
+     0.65,
+     "Min Body / Candle Range",
+     minval=0.0,
+     maxval=1.0,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpBullCloseLocation = input.float(
+     0.70,
+     "Bull Close Location >=",
+     minval=0.0,
+     maxval=1.0,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpBearCloseLocation = input.float(
+     0.30,
+     "Bear Close Location <=",
+     minval=0.0,
+     maxval=1.0,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpFastAtr = ta.atr(
+     vpFastAtrLength
+)
+float vpSlowAtr = ta.atr(
+     vpSlowAtrLength
+)
+float vpRange = math.max(
+     high - low,
+     syminfo.mintick
+)
+float vpBody = math.abs(
+     close - open
+)
+float vpCloseLocation = (
+     (close - low) /
+     vpRange
+)
+float vpVolumeAverage = ta.sma(
+     volume,
+     vpVolumeLength
+)
+float vpAtrRatio = (
+     vpSlowAtr > 0
+     ? vpFastAtr / vpSlowAtr
+     : 0.0
+)
+float vpRangeAtr = (
+     vpSlowAtr > 0
+     ? vpRange / vpSlowAtr
+     : 0.0
+)
+float vpVolumeRatio = (
+     vpVolumeAverage > 0
+     ? volume / vpVolumeAverage
+     : 0.0
+)
+float vpBodyAtr = (
+     vpSlowAtr > 0
+     ? vpBody / vpSlowAtr
+     : 0.0
+)
+float vpBodyRange = (
+     vpRange > 0
+     ? vpBody / vpRange
+     : 0.0
+)
+bool vpAtrPoint = (
+     vpAtrRatio >= vpMinAtrRatio
+)
+bool vpRangePoint = (
+     vpRangeAtr >= vpMinRangeAtr
+)
+bool vpVolumePoint = (
+     vpVolumeRatio >= vpMinVolumeRatio
+)
+int vpScore = (
+     (vpAtrPoint ? 1 : 0) +
+     (vpRangePoint ? 1 : 0) +
+     (vpVolumePoint ? 1 : 0)
+)
+bool vpQualified = (
+     vpScore >= vpMinScore
+)
+bool bullDirectionalCandle = (
+     close > open and
+     vpCloseLocation >= vpBullCloseLocation and
+     vpBodyAtr >= vpMinBodyAtr and
+     vpBodyRange >= vpMinBodyRange
+)
+bool bearDirectionalCandle = (
+     close < open and
+     vpCloseLocation <= vpBearCloseLocation and
+     vpBodyAtr >= vpMinBodyAtr and
+     vpBodyRange >= vpMinBodyRange
+)
+bool bullVolatilityPush = (
+     vpQualified and
+     bullDirectionalCandle
+)
+bool bearVolatilityPush = (
+     vpQualified and
+     bearDirectionalCandle
+)
+int bullPushAge = nz(
+     ta.barssince(bullVolatilityPush),
+     100000
+)
+int bearPushAge = nz(
+     ta.barssince(bearVolatilityPush),
+     100000
+)
+bool bullPushConfirmed = (
+     not useVolatilityPushFilter or
+     (
+         bullPushAge <= vpConfirmationWindow and
+         bullPushAge < bearPushAge
+     )
+)
+bool bearPushConfirmed = (
+     not useVolatilityPushFilter or
+     (
+         bearPushAge <= vpConfirmationWindow and
+         bearPushAge < bullPushAge
+     )
+)
+plotshape(
+     showVolatilityPush and
+     bullVolatilityPush,
+     title="Bullish Volatility Push",
+     style=shape.triangleup,
+     location=location.belowbar,
+     color=cGreen,
+     size=size.tiny,
+     text="VP+"
+)
+plotshape(
+     showVolatilityPush and
+     bearVolatilityPush,
+     title="Bearish Volatility Push",
+     style=shape.triangledown,
+     location=location.abovebar,
+     color=cRed,
+     size=size.tiny,
+     text="VP-"
+)
+// ============================================================================
+// 2R PROFIT / STOP MODULE
+//
+// Stop = ATR × Stop ATR Multiple
+// Target = Stop distance × R
+//
+// Default:
+// Stop = 1 ATR
+// Target = 2R
+// ============================================================================
+string GROUP_RISK = "2R Profit / Stop"
+bool useRiskManagement = input.bool(
+     true,
+     "Use Profit / Stop",
+     group=GROUP_RISK
+)
+int riskAtrLength = input.int(
+     14,
+     "Risk ATR Length",
+     minval=1,
+     group=GROUP_RISK,
+     inline="risk"
+)
+float stopAtrMultiple = input.float(
+     1.0,
+     "Stop ATR Multiple",
+     minval=0.05,
+     step=0.05,
+     group=GROUP_RISK,
+     inline="risk"
+)
+float rewardRiskMultiple = input.float(
+     2.0,
+     "Profit Target (R)",
+     minval=0.25,
+     step=0.25,
+     group=GROUP_RISK
+)
+bool showRiskLevels = input.bool(
+     true,
+     "Show Stop / Target",
+     group=GROUP_RISK
+)
+float riskAtr = ta.atr(
+     riskAtrLength
+)
+var float longStop = na
+var float longTarget = na
+var float shortStop = na
+var float shortTarget = na
+// ============================================================================
+// ENTRY CONDITIONS
+//
+// Kernel color change = trigger.
+// Slope + Volatility Push = confirmations.
+// ============================================================================
+bool longEntrySignal = (
+     enableLongs and
+     inTradingSession and
+     kernelBullishFlip and
+     longSlopePass and
+     bullPushConfirmed
+)
+bool shortEntrySignal = (
+     enableShorts and
+     inTradingSession and
+     kernelBearishFlip and
+     shortSlopePass and
+     bearPushConfirmed
+)
+bool canEnterLong = (
+     longEntrySignal and
+     strategy.position_size <= 0
+)
+bool canEnterShort = (
+     shortEntrySignal and
+     strategy.position_size >= 0
+)
+if canEnterLong
+    strategy.entry(
+         "KAIROS Long",
+         strategy.long,
+         comment="KAIROS LONG",
+         alert_message="KAIROS LC LONG | {{ticker}} @ {{strategy.order.price}}"
+    )
+else if canEnterShort
+    strategy.entry(
+         "KAIROS Short",
+         strategy.short,
+         comment="KAIROS SHORT",
+         alert_message="KAIROS LC SHORT | {{ticker}} @ {{strategy.order.price}}"
+    )
+// ============================================================================
+// LOCK RISK LEVELS AFTER ACTUAL FILL
+// ============================================================================
+bool newLongPosition = (
+     strategy.position_size > 0 and
+     strategy.position_size[1] <= 0
+)
+bool newShortPosition = (
+     strategy.position_size < 0 and
+     strategy.position_size[1] >= 0
+)
+if newLongPosition
+    float riskDistance = (
+         riskAtr *
+         stopAtrMultiple
+    )
+    longStop := (
+         strategy.position_avg_price -
+         riskDistance
+    )
+    longTarget := (
+         strategy.position_avg_price +
+         riskDistance *
+         rewardRiskMultiple
+    )
+    shortStop := na
+    shortTarget := na
+if newShortPosition
+    float riskDistance = (
+         riskAtr *
+         stopAtrMultiple
+    )
+    shortStop := (
+         strategy.position_avg_price +
+         riskDistance
+    )
+    shortTarget := (
+         strategy.position_avg_price -
+         riskDistance *
+         rewardRiskMultiple
+    )
+    longStop := na
+    longTarget := na
+// ============================================================================
+// 2R EXITS
+// ============================================================================
+if (
+     useRiskManagement and
+     strategy.position_size > 0 and
+     not na(longStop) and
+     not na(longTarget)
+)
+    strategy.exit(
+         "KAIROS Long Risk Exit",
+         from_entry="KAIROS Long",
+         stop=longStop,
+         limit=longTarget,
+         comment="KAIROS LONG 2R/STOP",
+         alert_message="KAIROS LC LONG EXIT | {{ticker}} @ {{strategy.order.price}}"
+    )
+if (
+     useRiskManagement and
+     strategy.position_size < 0 and
+     not na(shortStop) and
+     not na(shortTarget)
+)
+    strategy.exit(
+         "KAIROS Short Risk Exit",
+         from_entry="KAIROS Short",
+         stop=shortStop,
+         limit=shortTarget,
+         comment="KAIROS SHORT 2R/STOP",
+         alert_message="KAIROS LC SHORT EXIT | {{ticker}} @ {{strategy.order.price}}"
+    )
+// ============================================================================
+// OPPOSITE KERNEL FLIP EXIT
+//
+// If the opposite flip also passes VP + slope confirmation,
+// strategy.entry() handles the reversal.
+//
+// If it does not qualify as a reversal entry, the current position is closed.
+// ============================================================================
+if (
+     exitOnOppositeKernelFlip and
+     strategy.position_size > 0 and
+     kernelBearishFlip and
+     not canEnterShort
+)
+    strategy.close(
+         "KAIROS Long",
+         comment="KAIROS OPPOSITE KERNEL EXIT",
+         alert_message="KAIROS LC CLOSE LONG - KERNEL FLIP | {{ticker}} @ {{strategy.order.price}}"
+    )
+if (
+     exitOnOppositeKernelFlip and
+     strategy.position_size < 0 and
+     kernelBullishFlip and
+     not canEnterLong
+)
+    strategy.close(
+         "KAIROS Short",
+         comment="KAIROS OPPOSITE KERNEL EXIT",
+         alert_message="KAIROS LC CLOSE SHORT - KERNEL FLIP | {{ticker}} @ {{strategy.order.price}}"
+    )
+// ============================================================================
+// SESSION CUTOFF
+// ============================================================================
+if (
+     closeAtSessionEnd and
+     sessionCutoffBar and
+     strategy.position_size != 0
+)
+    strategy.close_all(
+         comment="KAIROS SESSION CUTOFF",
+         immediately=true,
+         alert_message="KAIROS LC SESSION CUTOFF | {{ticker}} @ {{strategy.order.price}}"
+    )
+// ============================================================================
+// RESET RISK LEVELS AFTER EXIT
+// ============================================================================
+if (
+     strategy.position_size == 0 and
+     strategy.position_size[1] != 0
+)
+    longStop := na
+    longTarget := na
+    shortStop := na
+    shortTarget := na
+// ============================================================================
+// CHART SIGNALS
+// ============================================================================
+plotshape(
+     longEntrySignal,
+     title="KAIROS Long Signal",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=cGreen,
+     textcolor=color.white,
+     size=size.small,
+     text="K L"
+)
+plotshape(
+     shortEntrySignal,
+     title="KAIROS Short Signal",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=cRed,
+     textcolor=color.white,
+     size=size.small,
+     text="K S"
+)
+plot(
+     showRiskLevels and
+     strategy.position_size > 0
+     ? longStop
+     : na,
+     title="Long Stop",
+     color=color.new(cRed, 10),
+     linewidth=1,
+     style=plot.style_linebr
+)
+plot(
+     showRiskLevels and
+     strategy.position_size > 0
+     ? longTarget
+     : na,
+     title="Long 2R Target",
+     color=color.new(cGreen, 10),
+     linewidth=1,
+     style=plot.style_linebr
+)
+plot(
+     showRiskLevels and
+     strategy.position_size < 0
+     ? shortStop
+     : na,
+     title="Short Stop",
+     color=color.new(cRed, 10),
+     linewidth=1,
+     style=plot.style_linebr
+)
+plot(
+     showRiskLevels and
+     strategy.position_size < 0
+     ? shortTarget
+     : na,
+     title="Short 2R Target",
+     color=color.new(cGreen, 10),
+     linewidth=1,
+     style=plot.style_linebr
+)
+// ============================================================================
+// STRATEGY STATISTICS TABLE
+// ============================================================================
+string GROUP_STATS = "Statistics Table"
+bool showStats = input.bool(
+     true,
+     "Show Statistics",
+     group=GROUP_STATS
+)
+string statsPosition = input.string(
+     "Top Right",
+     "Table Position",
+     options=["Top Right", "Bottom Right", "Top Left", "Bottom Left"],
+     group=GROUP_STATS
+)
+string statsFont = input.string(
+     "Normal",
+     "Font Size",
+     options=["Small", "Normal", "Large"],
+     group=GROUP_STATS
+)
+string statsFontFamilyInput = input.string("Default", "Table Font Family", options=["Default", "Monospace"], group=GROUP_STATS)
+string statsFontFamily = statsFontFamilyInput == "Monospace" ? font.family_monospace : font.family_default
+statsTablePosition = switch statsPosition
+    "Bottom Right" => position.bottom_right
+    "Top Left" => position.top_left
+    "Bottom Left" => position.bottom_left
+    => position.top_right
+statsTextSize = switch statsFont
+    "Small" => size.small
+    "Large" => size.large
+    => size.normal
+color statsBackground = color.new(cNavy, 10)
+color statsHeader = color.new(cNavy, 10)
+color statsBorder = color.new(cGold, 70)
+var table statsTable = table.new(
+     statsTablePosition,
+     2,
+     12,
+     bgcolor=statsBackground,
+     frame_color=color.new(cGold, 45),
+     frame_width=2,
+     border_color=statsBorder,
+     border_width=1
+)
+// Text formatting helpers.
+f_kairosNumber(float value) =>
+    na(value) ? "—" : str.tostring(value, "#.##")
+f_kairosMoney(float value) =>
+    f_kairosNumber(value) + " " + strategy.account_currency
+// Write one table row.
+f_kairosStatsRow(
+     table target,
+     int row,
+     string labelText,
+     string valueText,
+     color valueColor,
+     string fontSize
+) =>
+    table.cell(
+         target,
+         0,
+         row,
+         labelText,
+         text_color=cLabel,
+         text_halign=text.align_left,
+         text_size=fontSize,
+         text_font_family=statsFontFamily,
+         bgcolor=row % 2 == 0 ? color.new(cDarkNavy, 75) : color.new(cNavy, 75)
+    )
+    table.cell(
+         target,
+         1,
+         row,
+         valueText,
+         text_color=valueColor,
+         text_halign=text.align_right,
+         text_size=fontSize,
+         text_font_family=statsFontFamily,
+         bgcolor=row % 2 == 0 ? color.new(cDarkNavy, 75) : color.new(cNavy, 75)
+    )
+// Includes the last historical bar and subsequent realtime updates.
+if barstate.islastconfirmedhistory or barstate.islast
+    if showStats
+        int closedTrades = strategy.closedtrades
+        int winningTrades = strategy.wintrades
+        int losingTrades = strategy.losstrades
+        int evenTrades = strategy.eventrades
+        float winRate = closedTrades > 0 ? winningTrades * 100.0 / closedTrades : na
+        float grossLossAbs = math.abs(strategy.grossloss)
+        float profitFactor = grossLossAbs > 0 ? strategy.grossprofit / grossLossAbs : na
+        float averageTrade = closedTrades > 0 ? strategy.netprofit / closedTrades : na
+        float netReturn = strategy.initial_capital > 0 ? strategy.netprofit / strategy.initial_capital * 100.0 : na
+        string profitFactorText = grossLossAbs > 0 ? f_kairosNumber(profitFactor) : strategy.grossprofit > 0 ? "No losses" : "—"
+        string positionText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+        color positionColor = strategy.position_size > 0 ? cGreen : strategy.position_size < 0 ? cRed : color.silver
+        color profitColor = strategy.netprofit > 0 ? cGreen : strategy.netprofit < 0 ? cRed : color.silver
+        color averageColor = na(averageTrade) ? color.silver : averageTrade >= 0 ? cGreen : cRed
+        table.cell(
+             statsTable,
+             0,
+             0,
+             "KAIROS LC",
+             tooltip=showKairosStory ? KAIROS_STORY : "",
+             bgcolor=statsHeader,
+             text_color=cGold,
+             text_halign=text.align_left,
+             text_size=statsTextSize,
+             text_font_family=statsFontFamily
+        )
+        table.cell(
+             statsTable,
+             1,
+             0,
+             "STRATEGY STATS",
+             bgcolor=statsHeader,
+             text_color=cSilver,
+             text_halign=text.align_right,
+             text_size=statsTextSize,
+             text_font_family=statsFontFamily
+        )
+        f_kairosStatsRow(statsTable, 1, "Closed Trades", str.tostring(closedTrades), color.white, statsTextSize)
+        f_kairosStatsRow(statsTable, 2, "Wins / Losses", str.tostring(winningTrades) + " / " + str.tostring(losingTrades), color.white, statsTextSize)
+        f_kairosStatsRow(statsTable, 3, "Breakeven Trades", str.tostring(evenTrades), color.silver, statsTextSize)
+        f_kairosStatsRow(statsTable, 4, "Win Rate", na(winRate) ? "—" : f_kairosNumber(winRate) + "%", color.white, statsTextSize)
+        f_kairosStatsRow(statsTable, 5, "Profit Factor", profitFactorText, color.white, statsTextSize)
+        f_kairosStatsRow(statsTable, 6, "Net Profit", f_kairosMoney(strategy.netprofit), profitColor, statsTextSize)
+        f_kairosStatsRow(statsTable, 7, "Net Return", na(netReturn) ? "—" : f_kairosNumber(netReturn) + "%", profitColor, statsTextSize)
+        f_kairosStatsRow(statsTable, 8, "Average Trade", na(averageTrade) ? "—" : f_kairosMoney(averageTrade), averageColor, statsTextSize)
+        f_kairosStatsRow(statsTable, 9, "Max Drawdown", f_kairosMoney(strategy.max_drawdown), cRed, statsTextSize)
+        f_kairosStatsRow(statsTable, 10, "Position", positionText, positionColor, statsTextSize)
+        f_kairosStatsRow(statsTable, 11, "Target", useRiskManagement ? f_kairosNumber(rewardRiskMultiple) + "R" : "Disabled", color.white, statsTextSize)
+    else
+        table.clear(statsTable, 0, 0, 1, 11)
+// ============================================================================
+// ============================================================================
+// EDITABLE BOTTOM WATERMARK — BELLEROPHONTES GOLD THEME
+// ============================================================================
+string GROUP_FOOTER = "Bottom Watermark"
+bool showBottomWatermark = input.bool(true, "Show Bottom Watermark", group=GROUP_FOOTER)
+string bottomWatermarkText = input.string("KAIROS · LC SWING ENGINE · JXS_918", "Bottom Text", group=GROUP_FOOTER)
+int bottomWatermarkSize = input.int(14, "Bottom Font Size", minval=8, maxval=36, group=GROUP_FOOTER)
+string bottomWatermarkFamilyInput = input.string("Default", "Bottom Font Family", options=["Default", "Monospace"], group=GROUP_FOOTER)
+color bottomWatermarkColor = input.color(color.new(#FFD700, 45), "Bottom Text Color", group=GROUP_FOOTER)
+string bottomWatermarkFamily = bottomWatermarkFamilyInput == "Monospace" ? font.family_monospace : font.family_default
+var table bottomWatermark = table.new(position.bottom_center, 1, 1)
+if barstate.islastconfirmedhistory or barstate.islast
+    if showBottomWatermark
+        table.cell(bottomWatermark, 0, 0, bottomWatermarkText, text_color=bottomWatermarkColor, text_size=bottomWatermarkSize, text_font_family=bottomWatermarkFamily, bgcolor=color.new(color.black, 100))
+    else
+        table.clear(bottomWatermark, 0, 0, 0, 0)
+
+// FILLED TRADE ENTRY ALERTS
+//
+// Requires calc_on_order_fills=true, which your strategy already uses.
+// Alerts fire for actual strategy entry fills, not unfilled setup signals.
+// varip preserves duplicate protection across same-bar fill recalculations.
+// ============================================================================
+string GROUP_TRADE_ALERTS = "Trade Entry Alerts"
+bool enableTradeAlerts = input.bool(
+     true,
+     "Enable Filled Entry Alerts",
+     group=GROUP_TRADE_ALERTS
+)
+bool alertLongTrades = input.bool(
+     true,
+     "Alert Long Entries",
+     group=GROUP_TRADE_ALERTS,
+     inline="direction"
+)
+bool alertShortTrades = input.bool(
+     true,
+     "Alert Short Entries",
+     group=GROUP_TRADE_ALERTS,
+     inline="direction"
+)
+varip string lastKairosEntryAlertKey = ""
+if strategy.position_size != 0 and strategy.opentrades > 0
+    int openTradeIndex = strategy.opentrades - 1
+    int entryBar = strategy.opentrades.entry_bar_index(openTradeIndex)
+    int entryTime = strategy.opentrades.entry_time(openTradeIndex)
+    float actualEntryPrice = strategy.opentrades.entry_price(openTradeIndex)
+    bool filledLong = strategy.position_size > 0
+    string directionText = filledLong ? "LONG" : "SHORT"
+    string entryAlertKey = (
+         str.tostring(entryTime) + "|" +
+         str.tostring(strategy.closedtrades) + "|" +
+         directionText
+    )
+    bool entryFilledThisBar = entryBar == bar_index
+    bool entryNotYetAlerted = entryAlertKey != lastKairosEntryAlertKey
+    if entryFilledThisBar and entryNotYetAlerted
+        lastKairosEntryAlertKey := entryAlertKey
+        bool directionEnabled = filledLong ? alertLongTrades : alertShortTrades
+        if barstate.isrealtime and enableTradeAlerts and directionEnabled
+            string entryMessage = (
+                 "KAIROS LC " + directionText + " FILLED" +
+                 " | " + syminfo.tickerid +
+                 " | Timeframe: " + timeframe.period +
+                 " | Entry: " + str.tostring(actualEntryPrice, format.mintick)
+            )
+            alert(
+                 entryMessage,
+                 alert.freq_all
+            )
