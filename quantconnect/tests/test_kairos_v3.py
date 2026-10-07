@@ -115,7 +115,7 @@ def option_data(bot, records, price=600):
 class TestKairos(unittest.TestCase):
     def test_requested_defaults_and_dates(self):
         b=Bot()
-        self.assertEqual(b.execution_mode,'shares')
+        self.assertEqual(b.execution_mode,'options')
         self.assertEqual(b.period,timedelta(minutes=3))
         self.assertEqual(b.start,(2025,10,7))
         self.assertEqual(b.end,(2026,10,6))
@@ -134,39 +134,39 @@ class TestKairos(unittest.TestCase):
                        {'kernel_lag':'0'},{'one_year_backtest':'bad'}):
             with self.assertRaises(ValueError): Bot(params)
     def test_whole_share_budget_and_actual_fill_anchor(self):
-        b=Bot(); b.market_price=600.03; b._enter_position(1,600,2)
+        b=Bot({'execution_mode':'shares'}); b.market_price=600.03; b._enter_position(1,600,2)
         self.assertEqual(b.portfolio['SPY'].quantity,4)
         self.assertAlmostEqual(b.stop_price,597.03)
         self.assertAlmostEqual(b.target_price,601.38)
         self.assertEqual([r[1][1] for r in b.bracket_requests],[-4,-4])
     def test_short_levels_and_reversal_cancels_old_bracket(self):
-        b=Bot(); b._enter_position(1,600,2); old=list(b.risk_tickets)
+        b=Bot({'execution_mode':'shares'}); b._enter_position(1,600,2); old=list(b.risk_tickets)
         b._enter_position(-1,600,2)
         self.assertEqual(b.portfolio['SPY'].quantity,-4)
         self.assertTrue(all(t.status=='CANCELED' for t in old))
         self.assertEqual([c[2] for c in b.calls if c[0]=='market'],[4,-8])
         self.assertEqual((b.stop_price,b.target_price),(603,598.65))
     def test_unaffordable_share_skips(self):
-        b=Bot(); b._enter_position(1,3000,2)
+        b=Bot({'execution_mode':'shares'}); b._enter_position(1,3000,2)
         self.assertFalse(any(c[0]=='market' for c in b.calls))
     def test_rejected_reversal_restores_previous_protection(self):
-        b=Bot(); b._enter_position(1,600,2); b.reject_entry=True
+        b=Bot({'execution_mode':'shares'}); b._enter_position(1,600,2); b.reject_entry=True
         b._enter_position(-1,600,2)
         self.assertEqual(b.portfolio['SPY'].quantity,4)
         self.assertEqual((b.stop_price,b.target_price),(597,601.35))
         self.assertTrue(all(t.status=='SUBMITTED' for t in b.risk_tickets))
     def test_cash_cap_can_be_enabled_without_changing_target_R(self):
-        b=Bot({'enable_cash_loss_cap':'true','maximum_cash_loss':'4'})
+        b=Bot({'execution_mode':'shares','enable_cash_loss_cap':'true','maximum_cash_loss':'4'})
         b._enter_position(1,600,2)
         self.assertEqual((b.stop_price,b.target_price),(599,601.35))
     def test_cutoff_cancels_and_flattens(self):
-        b=Bot(); b._enter_position(1,600,2); old=list(b.risk_tickets)
+        b=Bot({'execution_mode':'shares'}); b._enter_position(1,600,2); old=list(b.risk_tickets)
         b._session_cutoff()
         self.assertFalse(b.portfolio['SPY'].invested)
         self.assertTrue(all(t.status=='CANCELED' for t in old))
         self.assertEqual(b.blocked_date,b.time.date())
     def test_warmup_never_orders(self):
-        b=Bot(); b.is_warming_up=True; b.REQUIRE_VOLATILITY_PUSH=False
+        b=Bot({'execution_mode':'shares'}); b.is_warming_up=True; b.REQUIRE_VOLATILITY_PUSH=False
         for i in range(100):
             c=600+math.sin(i/4)
             b.on_signal_bar(bar(b.time+timedelta(minutes=3*i),c-.1,c+.2,c-.2,c))
@@ -200,7 +200,7 @@ class TestKairos(unittest.TestCase):
         self.assertEqual(b._volatility_push(10,12,10,11.9,500,1.2,1),(True,False))
         self.assertEqual(b._volatility_push(12,12,10,10.1,500,1.2,1),(False,True))
     def test_signal_window_and_confirmed_reversals(self):
-        b=Bot(); b.REQUIRE_VOLATILITY_PUSH=False
+        b=Bot({'execution_mode':'shares'}); b.REQUIRE_VOLATILITY_PUSH=False
         calls=[]; b._enter_position=lambda direction,*rest:calls.append((b.time,direction))
         for i in range(100):
             b.time=datetime(2026,10,6,9,30)+timedelta(minutes=3*i)
@@ -240,7 +240,7 @@ class TestKairos(unittest.TestCase):
         b.on_data(option_data(b,[('C','CALL',600,0,1.9,2,True)],600))
         self.assertIsNone(b.active_option)
     def test_option_signal_not_delayed_and_fresh_chain(self):
-        b=Bot({'execution_mode':'options'})
+        b=Bot()
         data=option_data(b,[('P','PUT',600,0,1.9,2,True)])
         b.pending_signal=(b.time-timedelta(minutes=1),-1,600,2)
         b.on_data(data)

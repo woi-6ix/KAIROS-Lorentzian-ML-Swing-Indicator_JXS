@@ -17,13 +17,13 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
     used by the v3 Pine entry logic. Minute data models stop/target execution.
     VP looks BACK 10 bars; it does not wait 10 bars after the kernel flip.
 
-    Default execution_mode=shares: floor(2500 / signal close) SPY shares.
+    Optional execution_mode=shares: floor(2500 / signal close) SPY shares.
     This is a USD allocation, NOT Pine's literal qty=2500 (2500 shares).
     Entry slippage/fees may make actual cost differ from signal notional.
     stop = entry ATR(14) * 1.5; 1R = that distance; target = 0.45R.
     Opposite flip exits OFF still permits fully confirmed opposite reversals.
 
-    Optional execution_mode=options: buy ATM calls for long signals and ATM
+    Default execution_mode=options: buy ATM calls for long signals and ATM
     puts for short signals, nearest expiry in 0-2 calendar days. Here $2500
     is the premium budget, rounded down to whole contracts using fresh ask
     quotes and the actual multiplier. No short options and no stock entries.
@@ -48,11 +48,11 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
     Fees use LEAN's brokerage defaults; stock slippage defaults to zero.
     Option market fills include bid/ask spread when quote data is available.
     Requires a current cloud LEAN engine with native OCO for shares mode.
-    This file has been locally tested, not run on a QC cloud account.
+    Options mode has been locally tested, not run on a QC cloud account.
     """
 
     # Requested test configuration.
-    EXECUTION_MODE = "shares"
+    EXECUTION_MODE = "options"
     ENABLE_CASH_LOSS_CAP = False
     MAXIMUM_CASH_LOSS = 500.0
     OPTION_MIN_DTE = 0
@@ -60,7 +60,7 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
     OPTION_STRIKES_EITHER_SIDE = 5
     TICKER = "SPY"
     BAR_MINUTES = 3
-    DOLLARS_PER_TRADE = 2500.0  # USD position notional, before transaction fees.
+    DOLLARS_PER_TRADE = 2500.0  # USD option premium budget, before transaction fees.
     ONE_YEAR_BACKTEST = True
     FULL_HISTORY_START_DATE = (2024, 1, 1)
     END_DATE = (2026, 10, 6)
@@ -233,7 +233,7 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
             f"KAIROS V3 | {self.TICKER} {self.BAR_MINUTES}m | "
             f"{self.backtest_start} to {self.backtest_end} | "
             f"one_year_backtest={self.one_year_backtest} | "
-            f"mode={self.execution_mode} | ${self.DOLLARS_PER_TRADE:.0f} allocation | "
+            f"mode={self.execution_mode} | ${self.DOLLARS_PER_TRADE:.0f} budget | "
             f"target={self.PROFIT_TARGET_R}R"
         )
 

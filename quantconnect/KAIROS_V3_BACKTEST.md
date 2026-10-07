@@ -1,6 +1,6 @@
-# KAIROS V3 — QuantConnect backtest
+# KAIROS V3 — QuantConnect options backtest
 
-Copy all of `kairos_v3_spy_3min_backtest.py` into `main.py` in a new **Python** QuantConnect cloud project, save, and run a backtest. Use the current cloud LEAN engine: shares mode uses native one-cancels-other (OCO) orders. The file is under the 32,000-character editor limit.
+Copy all of `kairos_v3_spy_3min_backtest.py` into `main.py` in a new **Python** QuantConnect cloud project, save, set the project parameter **`execution_mode = options`** (replace any saved `shares` value), and run a backtest. Use the current cloud LEAN engine: shares mode uses native one-cancels-other (OCO) orders. The file is under the 32,000-character editor limit.
 
 This port uses `KAIROS_LC_Swing_Engine_V3_JXS_918.pine` at commit `079ca3fc4e30eaa4eebb6cbc9dbfa628b52150b2`. It preserves v3's Rational Quadratic/Gaussian kernel flip, slope, directional Volatility Push, fixed entry ATR risk, and qualified reversal rules. Pine's chart appearance and alerts are omitted. The existing Pine files and repository README are unchanged.
 
@@ -9,10 +9,10 @@ This port uses `KAIROS_LC_Swing_Engine_V3_JXS_918.pine` at commit `079ca3fc4e30e
 | Parameter | Setting |
 |---|---|
 | Symbol | SPY |
-| Default execution | SPY shares, long or short |
+| Default execution | Buy SPY calls for bullish signals; buy SPY puts for bearish signals |
 | Signal timeframe | 3 minutes |
 | Data / exit fill resolution | 1 minute |
-| Allocation per new long/short | USD 2,500; `floor(2500 / signal close)` shares |
+| Premium budget per new bullish/bearish trade | USD 2,500; `floor(2500 / (fresh option ask × contract multiplier))` contracts |
 | One-year backtest | ON |
 | Default test dates | October 7, 2025 – October 6, 2026, inclusive |
 | Exit on unconfirmed opposite kernel flip | OFF |
@@ -28,9 +28,9 @@ This port uses `KAIROS_LC_Swing_Engine_V3_JXS_918.pine` at commit `079ca3fc4e30e
 | Maximum cash loss toggle | OFF |
 | Initial account cash | USD 100,000 |
 
-**Sizing clarification:** The user selected **$2,500 in SPY shares**, rather than 2,500 shares. Pine's `Entry Quantity / Shares = 2500` would mean **2,500 shares**. This Python version deliberately uses the selected dollar allocation: at $600, it opens four shares ($2,400 signal notional). Fill-price differences and fees can change actual cost. The allocation is neither stop-loss risk nor account starting cash.
+**Sizing clarification:** The corrected default spends up to **$2,500 in SPY option premium per trade**, rounded down to whole contracts. For a standard 100 multiplier and $2 ask premium, it buys 12 contracts (quoted premium cost $2,400). Actual fills and fees can differ from the quoted budget. Both calls and puts are purchased; the bearish trade is a long put, not short SPY stock or short options. No SPY share orders are submitted in options mode. The previous shares-mode result concerned about three shares per position, not 2,000–2,500 shares, and does not measure this options version.
 
-**R clarification:** Stop distance is `entry ATR(14) × 1.5`. One R equals that distance; target distance is `0.45 × stop distance = 0.675 × ATR`. With an entry at $600 and ATR $2, a long has stop $597 and target $601.35; a short has stop $603 and target $598.65. Levels are rounded to the stock's tick size and anchored to actual stock entry fills. Enabling the separate cash cap can tighten the stop without changing the ATR-derived target.
+**R clarification:** Preserve v3's SPY signal-price exits: stop distance is `entry SPY ATR(14) × 1.5`; 1R is that underlying distance, and target distance is `0.45 × stop distance = 0.675 × ATR`. With SPY at $600 and ATR $2, a bullish/call position has SPY exit thresholds $597 and $601.35; a bearish/put position has $603 and $598.65. Options mode observes minute SPY closes and liquidates the held option when a threshold is reached. **These are SPY price thresholds, not option premium prices or guaranteed option return multiples.** P&L uses historical option fills. Shares mode instead anchors native stop/target orders to stock fills, with tick rounding.
 
 **Opposite flips:** OFF disables the standalone exit on an opposite flip. A fully confirmed opposite entry still reverses, matching v3's Pine order logic. No same-direction pyramiding.
 
@@ -44,7 +44,7 @@ The requested values are already configured. Add parameters only to override the
 
 | QuantConnect parameter | Default | Meaning |
 |---|---|---|
-| `execution_mode` | `shares` | `shares` or `options` |
+| `execution_mode` | `options` | Actual SPY calls/puts; `shares` is a legacy comparison mode |
 | `one_year_backtest` | `true` | Test the 365 calendar dates ending on `end_date`; OFF uses the full-history start |
 | `end_date` | `2026-10-06` | Inclusive test end, YYYY-MM-DD |
 | `full_history_start_date` | `2024-01-01` | Used only with one-year toggle OFF |
@@ -61,9 +61,9 @@ The requested values are already configured. Add parameters only to override the
 
 Other preserved settings: kernel source close, lookback 8, relative weight 8, regression level 25; VP fast/slow ATR 5/20, volume SMA 20, minimum score 2/3, minimum ATR ratio 1.10, range/ATR 1.25, volume ratio 1.50, body/ATR 0.80, body/range 0.65, bullish/bearish close location 0.70/0.30. No additional EMA/SMA/ML entry filters.
 
-## Optional historical options mode
+## Default historical options mode
 
-To backtest actual options instead of the selected shares default, set **`execution_mode = options`** in the QC project parameters. Signals still use SPY's 3-minute bars:
+The file now defaults to options. In an existing QC project, also set **`execution_mode = options`** so a saved shares-mode parameter cannot override the new default. Signals use SPY's 3-minute bars:
 
 - Bullish signal buys an ATM call; bearish signal buys an ATM put. Puts provide bearish exposure; options are never sold short.
 - Select the nearest expiration within 0–2 calendar days, then closest strike, from a universe within five strikes either side including weekly contracts. This expiry/strike rule is an explicit added default because Pine does not select options.
@@ -79,7 +79,7 @@ QuantConnect supports options backtesting; the older DELPHI file's stock-only be
 
 Python syntax compilation and local tests with a LEAN API double passed. Tests cover requested defaults/dates, whole-share sizing, fill anchors, long/short levels, cancellation before reversal, rejected reversal recovery, cash-cap tightening, cutoff, warmup, Wilder ATR, kernel formulas, VP direction/age, signal session boundaries, actual option-symbol selection, premium sizing, stale/missing quotes, signal expiry, and failed-liquidation retries. These tests do **not** run the LEAN engine or historical market data.
 
-No QuantConnect cloud backtest was run as part of this conversion, and no historical performance is asserted. Keep LEAN's default brokerage fee/fill models: stock slippage is zero by default; option quote data lets simulated market fills account for bid/ask spreads. These are modeling assumptions, not live fills. Native stock OCO prioritizes the stop when both exits could fill on the same minute. Partial stock exits are followed by liquidation of residual exposure on the next callback. Gaps/slippage can exceed stop or cash-cap levels. Data normalization, different data feeds, and fill timing can produce differences from TradingView.
+The user reported a completed **shares-mode** cloud backtest (`dd352261b3817907e167e31236bb5c20`) with no runtime errors or rejected orders. That result concerns stock shares. **The corrected options-mode default has not yet been run on QuantConnect cloud; no options historical performance is asserted.** Keep LEAN's default brokerage fee/fill models: stock slippage is zero by default; option quote data lets simulated market fills account for bid/ask spreads. These are modeling assumptions, not live fills. Native stock OCO prioritizes the stop when both exits could fill on the same minute. Partial stock exits are followed by liquidation of residual exposure on the next callback. Gaps/slippage can exceed stop or cash-cap levels. Data normalization, different data feeds, and fill timing can produce differences from TradingView.
 
 Run local logic tests from the repository root:
 
