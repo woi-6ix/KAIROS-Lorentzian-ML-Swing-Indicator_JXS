@@ -10,6 +10,8 @@ This port uses `KAIROS_LC_Swing_Engine_V3_JXS_918.pine` at commit `079ca3fc4e30e
 |---|---|
 | Symbol | SPY |
 | Default execution | Buy SPY calls for bullish signals; buy SPY puts for bearish signals |
+| Expiration | 0DTE only: expires on the New York trading date |
+| Strike | Closest available ATM strike |
 | Signal timeframe | 3 minutes |
 | Data / exit fill resolution | 1 minute |
 | Premium budget per new bullish/bearish trade | USD 2,500; `floor(2500 / (fresh option ask × contract multiplier))` contracts |
@@ -66,7 +68,7 @@ Other preserved settings: kernel source close, lookback 8, relative weight 8, re
 The file now defaults to options. In an existing QC project, also set **`execution_mode = options`** so a saved shares-mode parameter cannot override the new default. Signals use SPY's 3-minute bars:
 
 - Bullish signal buys an ATM call; bearish signal buys an ATM put. Puts provide bearish exposure; options are never sold short.
-- Select the nearest expiration within 0–2 calendar days, then closest strike, from a universe within five strikes either side including weekly contracts. This expiry/strike rule is an explicit added default because Pine does not select options.
+- Select **0DTE only**, then the closest strike, from a universe within five strikes either side including weekly contracts. Both the universe filter and the entry selector require same-day expiry in New York. Missing eligible 0DTE contracts skips the signal; later expirations are never substituted.
 - Buy `floor(2500 / (fresh ask × contract multiplier))` contracts. For a standard 100 multiplier and $2 ask, that is 12 contracts. Quotes must be current, two-sided, non-fill-forward, positive, and non-crossed. Missing data or a premium exceeding the budget skips the signal, without a delayed retry or stock fallback.
 - The ATR stop and target remain **SPY price levels**. Exits are triggered by observable minute SPY closing values, then execute on the held option at LEAN's simulated market fill. Intraminute SPY touches are not used to invent option prices. Thus this mode's risk timing differs from the native stock OCO bracket.
 - Reported profit, loss and drawdown come from actual historical option premiums, not synthetic SPY returns. **0.45R is an underlying-price target, not a guaranteed option P&L multiple.** Theta, volatility, spreads and discrete contract quantities affect the result.

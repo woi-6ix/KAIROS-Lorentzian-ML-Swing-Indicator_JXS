@@ -24,7 +24,7 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
     Opposite flip exits OFF still permits fully confirmed opposite reversals.
 
     Default execution_mode=options: buy ATM calls for long signals and ATM
-    puts for short signals, nearest expiry in 0-2 calendar days. Here $2500
+    puts for short signals, SAME-DAY expiration only (0DTE). Here $2500
     is the premium budget, rounded down to whole contracts using fresh ask
     quotes and the actual multiplier. No short options and no stock entries.
     Exit triggers remain SPY-price ATR levels, checked on minute SPY closes;
@@ -56,7 +56,7 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
     ENABLE_CASH_LOSS_CAP = False
     MAXIMUM_CASH_LOSS = 500.0
     OPTION_MIN_DTE = 0
-    OPTION_MAX_DTE = 2
+    OPTION_MAX_DTE = 0
     OPTION_STRIKES_EITHER_SIDE = 5
     TICKER = "SPY"
     BAR_MINUTES = 3
@@ -167,7 +167,7 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
             option = self.add_option(self.symbol, Resolution.MINUTE)
             option.set_filter(lambda u: u.include_weeklys().strikes(
                 -self.OPTION_STRIKES_EITHER_SIDE, self.OPTION_STRIKES_EITHER_SIDE
-            ).expiration(self.OPTION_MIN_DTE, self.OPTION_MAX_DTE))
+            ).expiration(0, 0))
             self.option_symbol = option.symbol
         self.active_option = None
         self.option_direction = 0
@@ -594,9 +594,10 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
         right = OptionRight.CALL if direction > 0 else OptionRight.PUT
         candidates = []
         for contract in chain:
-            dte = (contract.expiry.date() - self.time.date()).days
+            # Enforce 0DTE again at entry; never substitute a later expiry
+            # when today's contracts are unavailable or unquoted.
             if (contract.right != right
-                    or not self.OPTION_MIN_DTE <= dte <= self.OPTION_MAX_DTE):
+                    or contract.expiry.date() != self.time.date()):
                 continue
             quote = data.quote_bars.get(contract.symbol)
             if (quote is None or quote.is_fill_forward or quote.end_time != self.time
@@ -606,7 +607,7 @@ class KairosV3QuantConnectBacktest(QCAlgorithm):
             if bid <= 0 or ask < bid or not math.isfinite(ask):
                 continue
             candidates.append((contract, bid, ask))
-        # Nearest expiry, then nearest strike; deterministic liquidity tie-break.
+        # Same-day expiry only, then nearest strike; liquidity tie-break.
         return min(candidates, key=lambda x: (
             x[0].expiry, abs(float(x[0].strike) - reference_price),
             x[2] - x[1], -float(x[0].volume), str(x[0].symbol)

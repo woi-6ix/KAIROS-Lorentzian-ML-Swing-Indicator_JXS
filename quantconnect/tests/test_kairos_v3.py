@@ -229,6 +229,23 @@ class TestKairos(unittest.TestCase):
         b._enter_option(data,1,600,2)
         self.assertEqual(b.skipped_option_signals,2)
         self.assertFalse(any(c[0]=='market' for c in b.calls))
+    def test_zero_DTE_only_even_with_closer_later_strikes(self):
+        b=Bot()
+        data=option_data(b,[('C0','CALL',601,0,1.9,2,True),
+                            ('C1','CALL',600,1,1.9,2,True),
+                            ('C2','CALL',600,2,1.9,2,True),
+                            ('P0','PUT',599,0,1.9,2,True),
+                            ('P1','PUT',600,1,1.9,2,True)])
+        self.assertEqual(b._select_option(data,1,600)[0].symbol,'C0')
+        self.assertEqual(b._select_option(data,-1,600)[0].symbol,'P0')
+    def test_no_same_day_contract_means_no_trade_or_fallback(self):
+        b=Bot()
+        data=option_data(b,[('C1','CALL',600,1,1.9,2,True),
+                            ('C2','CALL',600,2,1.9,2,True)])
+        b._enter_option(data,1,600,2)
+        self.assertEqual(b.skipped_option_signals,1)
+        self.assertIsNone(b.active_option)
+        self.assertFalse(any(c[0]=='market' for c in b.calls))
     def test_option_one_minute_stop_and_retry_failed_liquidation(self):
         b=Bot({'execution_mode':'options'})
         data=option_data(b,[('C','CALL',600,0,1.9,2,True)])
