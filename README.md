@@ -5,7 +5,7 @@
 ![Platform](https://img.shields.io/badge/Platform-TradingView-black)
 ![License](https://img.shields.io/badge/License-MPL--2.0-purple)
 
-**KAIROS V3** trades intraday kernel flips with slope and directional Volatility Push confirmation, fixed ATR targets/stops, editable entry shares and an independent cash-loss cap.
+**KAIROS V3** trades intraday kernel flips with slope and directional Volatility Push (VP) confirmation, fixed ATR targets/stops, editable entry shares and an independent cash-loss cap.
 
 **Why Kairos?** Kairos personifies the opportune moment in Greek mythology: waiting until direction, confirmation and trading hours align before entering a swing.
 
