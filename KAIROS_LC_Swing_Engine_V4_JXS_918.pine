@@ -1,0 +1,1281 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// See https://mozilla.org/MPL/2.0/
+// Lorentzian feature/distance/ANN and kernel regression logic adapted from jdehorty.
+// KAIROS strategy adaptation: JXS_918.
+// WHY KAIROS?
+// Kairos personifies the opportune moment in Greek mythology.
+// The name reflects waiting for a kernel swing signal and the enabled
+// confirmation filters to align within the selected trading session.
+//@version=6
+//@strategy_alert_message {{strategy.order.alert_message}}
+strategy(
+     title="KAIROS LC Swing Engine V4 {JXS_918}",
+     shorttitle="KAIROS LC V4",
+     overlay=true,
+     pyramiding=0,
+     process_orders_on_close=true,
+     calc_on_order_fills=true,
+     currency=currency.USD,
+     precision=4,
+     max_labels_count=500
+)
+import jdehorty/KernelFunctions/2 as kernels
+import jdehorty/MLExtensions/2 as ml
+// Naming explanation appears in settings and when hovering over the table title.
+const string KAIROS_STORY = "Kairos personifies the opportune moment in Greek mythology. This engine is named for waiting until a kernel swing signal and the enabled confirmation filters align within the selected trading session."
+bool showKairosStory = input.bool(true, "Show naming explanation in table header", group="About KAIROS", tooltip=KAIROS_STORY)
+// ============================================================================
+// COLORS
+// ============================================================================
+color cGreen = color.new(#00E5C3, 0)
+color cRed = color.new(#FF4D6D, 0)
+color cGray = color.new(#B0BEC5, 0)
+color cTransparent = color.new(color.black, 100)
+color cGold = #FFD700
+color cSilver = #C0C0C0
+color cNavy = #0A0E1A
+color cDarkNavy = #0F1420
+color cLabel = #B0BEC5
+// ============================================================================
+// GENERAL / DIRECTION
+// ============================================================================
+string GROUP_GENERAL = "General"
+bool enableLongs = input.bool(true, "Enable Longs", group=GROUP_GENERAL, inline="dir")
+bool enableShorts = input.bool(true, "Enable Shorts", group=GROUP_GENERAL, inline="dir")
+bool exitOnOppositeKernelFlip = input.bool(true, "Exit on Opposite Kernel Flip", group=GROUP_GENERAL)
+bool closeAtSessionEnd = input.bool(true, "Close Position at Session End", group=GROUP_GENERAL)
+// ============================================================================
+// EDITABLE NEW YORK TRADING SESSION
+// Default: 09:30 AM to 03:00 PM America/New_York.
+// Entries are based on the bar's closing timestamp.
+// ============================================================================
+string GROUP_SESSION = "Trading Session"
+string tradeTimezone = input.string("America/New_York", "Timezone", group=GROUP_SESSION)
+int startHour = input.int(
+     9,
+     "Start Hour",
+     minval=0,
+     maxval=23,
+     group=GROUP_SESSION,
+     inline="start"
+)
+int startMinute = input.int(
+     30,
+     "Minute",
+     minval=0,
+     maxval=59,
+     group=GROUP_SESSION,
+     inline="start"
+)
+int endHour = input.int(
+     15,
+     "End Hour",
+     minval=0,
+     maxval=23,
+     group=GROUP_SESSION,
+     inline="end"
+)
+int endMinute = input.int(
+     0,
+     "Minute",
+     minval=0,
+     maxval=59,
+     group=GROUP_SESSION,
+     inline="end"
+)
+int startOfDay = startHour * 60 + startMinute
+int endOfDay = endHour * 60 + endMinute
+bool sessionValid = startOfDay < endOfDay
+int barCloseMinute =
+     hour(time_close, tradeTimezone) * 60 +
+     minute(time_close, tradeTimezone)
+bool inTradingSession = (
+     timeframe.isintraday and
+     sessionValid and
+     not na(time_close) and
+     barCloseMinute >= startOfDay and
+     barCloseMinute < endOfDay
+)
+int cutoffTimestamp = timestamp(
+     tradeTimezone,
+     year(time_close, tradeTimezone),
+     month(time_close, tradeTimezone),
+     dayofmonth(time_close, tradeTimezone),
+     endHour,
+     endMinute
+)
+bool sessionCutoffBar = (
+     timeframe.isintraday and
+     sessionValid and
+     not na(time_close) and
+     time_close >= cutoffTimestamp and
+     (
+         na(time_close[1]) or
+         time_close[1] < cutoffTimestamp
+     )
+)
+// ============================================================================
+// KERNEL REGRESSION
+// The plotted green/red line is the primary KAIROS trade engine.
+// ============================================================================
+string GROUP_KERNEL = "Kernel Regression"
+float kernelSource = input.source(
+     close,
+     "Source",
+     group=GROUP_KERNEL
+)
+bool showKernel = input.bool(
+     true,
+     "Show Kernel Line",
+     group=GROUP_KERNEL,
+     inline="display"
+)
+bool useKernelSmoothing = input.bool(
+     false,
+     "Enhanced Smoothing",
+     group=GROUP_KERNEL,
+     inline="display"
+)
+int kernelLookback = input.int(
+     8,
+     "Lookback Window",
+     minval=3,
+     maxval=100,
+     group=GROUP_KERNEL
+)
+float kernelRelativeWeight = input.float(
+     8.0,
+     "Relative Weighting",
+     minval=0.25,
+     maxval=25.0,
+     step=0.25,
+     group=GROUP_KERNEL
+)
+int kernelRegressionLevel = input.int(
+     25,
+     "Regression Level",
+     minval=2,
+     maxval=100,
+     group=GROUP_KERNEL
+)
+int kernelLag = input.int(
+     5,
+     "Smoothing Lag",
+     minval=1,
+     maxval=20,
+     group=GROUP_KERNEL
+)
+float yhat1 = kernels.rationalQuadratic(
+     kernelSource,
+     kernelLookback,
+     kernelRelativeWeight,
+     kernelRegressionLevel
+)
+int gaussianLookback = math.max(
+     1,
+     kernelLookback - kernelLag
+)
+float yhat2 = kernels.gaussian(
+     kernelSource,
+     gaussianLookback,
+     kernelRegressionLevel
+)
+bool kernelBullishRate = (
+     yhat1 > yhat1[1]
+)
+bool kernelBearishRate = (
+     yhat1 < yhat1[1]
+)
+bool kernelBullishSmooth = (
+     yhat2 >= yhat1
+)
+bool kernelBearishSmooth = (
+     yhat2 <= yhat1
+)
+bool kernelBullish = (
+     useKernelSmoothing
+     ? kernelBullishSmooth
+     : kernelBullishRate
+)
+bool kernelBearish = (
+     useKernelSmoothing
+     ? kernelBearishSmooth
+     : kernelBearishRate
+)
+bool kernelBullishFlip = (
+     bar_index > 2 and
+     kernelBullish and
+     not kernelBullish[1]
+)
+bool kernelBearishFlip = (
+     bar_index > 2 and
+     kernelBearish and
+     not kernelBearish[1]
+)
+color kernelColor = (
+     kernelBullish
+     ? cGreen
+     : kernelBearish
+     ? cRed
+     : cGray
+)
+plot(
+     showKernel ? yhat1 : na,
+     title="KAIROS V4 Kernel Regression",
+     color=kernelColor,
+     linewidth=2
+)
+// ============================================================================
+// SLOPE FILTER
+// Requires the kernel to have enough directional slope in ATR-normalized terms.
+// A value of 0.05 means the kernel moved 0.05 ATR over the chosen lookback.
+// ============================================================================
+string GROUP_SLOPE = "Slope Filter"
+bool useSlopeFilter = input.bool(
+     true,
+     "Use Slope Filter",
+     group=GROUP_SLOPE
+)
+int slopeLookbackBars = input.int(
+     2,
+     "Slope Lookback Bars",
+     minval=1,
+     maxval=20,
+     group=GROUP_SLOPE
+)
+int slopeAtrLength = input.int(
+     14,
+     "ATR Length",
+     minval=1,
+     group=GROUP_SLOPE
+)
+float minSlopeAtr = input.float(
+     0.05,
+     "Minimum Slope (ATR units)",
+     minval=0.0,
+     step=0.01,
+     group=GROUP_SLOPE
+)
+float slopeAtr = ta.atr(
+     slopeAtrLength
+)
+float kernelSlopeRaw = (
+     yhat1 -
+     yhat1[slopeLookbackBars]
+)
+float kernelSlopeAtr = (
+     slopeAtr > 0
+     ? kernelSlopeRaw / slopeAtr
+     : 0.0
+)
+bool longSlopePass = (
+     not useSlopeFilter or
+     kernelSlopeAtr >= minSlopeAtr
+)
+bool shortSlopePass = (
+     not useSlopeFilter or
+     kernelSlopeAtr <= -minSlopeAtr
+)
+// ============================================================================
+// VOLATILITY PUSH FILTER
+//
+// Volatility Score:
+//   +1 ATR expansion
+//   +1 Candle range / ATR expansion
+//   +1 Volume expansion
+//
+// Default minimum = 2 of 3.
+//
+// Direction:
+// LONG requires strong bullish push candle.
+// SHORT requires strong bearish push candle.
+// ============================================================================
+string GROUP_VP = "Volatility Push"
+bool useVolatilityPushFilter = input.bool(
+     true,
+     "Require Volatility Push",
+     group=GROUP_VP
+)
+bool showVolatilityPush = input.bool(
+     true,
+     "Show VP Markers",
+     group=GROUP_VP
+)
+int vpConfirmationWindow = input.int(
+     0,
+     "Confirmation Window (bars)",
+     minval=0,
+     maxval=10,
+     group=GROUP_VP,
+     tooltip="0 = Volatility Push must occur on the same bar as the kernel color change."
+)
+int vpFastAtrLength = input.int(
+     5,
+     "Fast ATR Length",
+     minval=1,
+     group=GROUP_VP,
+     inline="atr"
+)
+int vpSlowAtrLength = input.int(
+     20,
+     "Slow ATR Length",
+     minval=2,
+     group=GROUP_VP,
+     inline="atr"
+)
+float vpMinAtrRatio = input.float(
+     1.10,
+     "Min ATR Ratio",
+     minval=0.1,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpMinRangeAtr = input.float(
+     1.25,
+     "Min Range / ATR",
+     minval=0.1,
+     step=0.05,
+     group=GROUP_VP
+)
+int vpVolumeLength = input.int(
+     20,
+     "Volume Average Length",
+     minval=1,
+     group=GROUP_VP
+)
+float vpMinVolumeRatio = input.float(
+     1.50,
+     "Min Volume Ratio",
+     minval=0.1,
+     step=0.05,
+     group=GROUP_VP
+)
+int vpMinScore = input.int(
+     2,
+     "Minimum Volatility Score",
+     minval=1,
+     maxval=3,
+     group=GROUP_VP
+)
+float vpMinBodyAtr = input.float(
+     0.80,
+     "Min Body / ATR",
+     minval=0.0,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpMinBodyRange = input.float(
+     0.65,
+     "Min Body / Candle Range",
+     minval=0.0,
+     maxval=1.0,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpBullCloseLocation = input.float(
+     0.70,
+     "Bull Close Location >=",
+     minval=0.0,
+     maxval=1.0,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpBearCloseLocation = input.float(
+     0.30,
+     "Bear Close Location <=",
+     minval=0.0,
+     maxval=1.0,
+     step=0.05,
+     group=GROUP_VP
+)
+float vpFastAtr = ta.atr(
+     vpFastAtrLength
+)
+float vpSlowAtr = ta.atr(
+     vpSlowAtrLength
+)
+float vpRange = math.max(
+     high - low,
+     syminfo.mintick
+)
+float vpBody = math.abs(
+     close - open
+)
+float vpCloseLocation = (
+     (close - low) /
+     vpRange
+)
+float vpVolumeAverage = ta.sma(
+     volume,
+     vpVolumeLength
+)
+float vpAtrRatio = (
+     vpSlowAtr > 0
+     ? vpFastAtr / vpSlowAtr
+     : 0.0
+)
+float vpRangeAtr = (
+     vpSlowAtr > 0
+     ? vpRange / vpSlowAtr
+     : 0.0
+)
+float vpVolumeRatio = (
+     vpVolumeAverage > 0
+     ? volume / vpVolumeAverage
+     : 0.0
+)
+float vpBodyAtr = (
+     vpSlowAtr > 0
+     ? vpBody / vpSlowAtr
+     : 0.0
+)
+float vpBodyRange = (
+     vpRange > 0
+     ? vpBody / vpRange
+     : 0.0
+)
+bool vpAtrPoint = (
+     vpAtrRatio >= vpMinAtrRatio
+)
+bool vpRangePoint = (
+     vpRangeAtr >= vpMinRangeAtr
+)
+bool vpVolumePoint = (
+     vpVolumeRatio >= vpMinVolumeRatio
+)
+int vpScore = (
+     (vpAtrPoint ? 1 : 0) +
+     (vpRangePoint ? 1 : 0) +
+     (vpVolumePoint ? 1 : 0)
+)
+bool vpQualified = (
+     vpScore >= vpMinScore
+)
+bool bullDirectionalCandle = (
+     close > open and
+     vpCloseLocation >= vpBullCloseLocation and
+     vpBodyAtr >= vpMinBodyAtr and
+     vpBodyRange >= vpMinBodyRange
+)
+bool bearDirectionalCandle = (
+     close < open and
+     vpCloseLocation <= vpBearCloseLocation and
+     vpBodyAtr >= vpMinBodyAtr and
+     vpBodyRange >= vpMinBodyRange
+)
+bool bullVolatilityPush = (
+     vpQualified and
+     bullDirectionalCandle
+)
+bool bearVolatilityPush = (
+     vpQualified and
+     bearDirectionalCandle
+)
+int bullPushAge = nz(
+     ta.barssince(bullVolatilityPush),
+     100000
+)
+int bearPushAge = nz(
+     ta.barssince(bearVolatilityPush),
+     100000
+)
+bool bullPushConfirmed = (
+     not useVolatilityPushFilter or
+     (
+         bullPushAge <= vpConfirmationWindow and
+         bullPushAge < bearPushAge
+     )
+)
+bool bearPushConfirmed = (
+     not useVolatilityPushFilter or
+     (
+         bearPushAge <= vpConfirmationWindow and
+         bearPushAge < bullPushAge
+     )
+)
+plotshape(
+     showVolatilityPush and
+     bullVolatilityPush,
+     title="Bullish Volatility Push",
+     style=shape.triangleup,
+     location=location.belowbar,
+     color=cGreen,
+     size=size.tiny,
+     text="VP+"
+)
+plotshape(
+     showVolatilityPush and
+     bearVolatilityPush,
+     title="Bearish Volatility Push",
+     style=shape.triangledown,
+     location=location.abovebar,
+     color=cRed,
+     size=size.tiny,
+     text="VP-"
+)
+// ============================================================================
+// 2R PROFIT / STOP MODULE
+//
+// Stop = ATR × Stop ATR Multiple
+// Target = Stop distance × R
+//
+// Default:
+// Stop = 1 ATR
+// Target = 2R
+// ============================================================================
+string GROUP_RISK = "2R Profit / Stop"
+bool useRiskManagement = input.bool(
+     true,
+     "Use Profit / Stop",
+     group=GROUP_RISK
+)
+int riskAtrLength = input.int(
+     14,
+     "Risk ATR Length",
+     minval=1,
+     group=GROUP_RISK,
+     inline="risk"
+)
+float stopAtrMultiple = input.float(
+     1.0,
+     "Stop ATR Multiple",
+     minval=0.05,
+     step=0.05,
+     group=GROUP_RISK,
+     inline="risk"
+)
+float rewardRiskMultiple = input.float(
+     2.0,
+     "Profit Target (R)",
+     minval=0.25,
+     step=0.25,
+     group=GROUP_RISK
+)
+bool showRiskLevels = input.bool(
+     true,
+     "Show Stop / Target",
+     group=GROUP_RISK
+)
+float riskAtr = ta.atr(
+     riskAtrLength
+)
+var float longStop = na
+var float longTarget = na
+var float shortStop = na
+var float shortTarget = na
+// ============================================================================
+// V4 EDITABLE QUANTITY AND INDEPENDENT MAXIMUM CASH LOSS
+// Default account currency is USD. Cash protection uses the actual filled size
+// and symbol point value. It shares the original exit bracket so the cash stop
+// cannot lose quantity coverage to a separate ATR/target exit reservation.
+// ============================================================================
+string GROUP_SIZE = "V4 Entry Quantity"
+float entryQuantityInput = input.float(1.0, "Entry Quantity / Shares", minval=0.001, step=1, group=GROUP_SIZE, tooltip="Underlying shares/contracts per new position. Rounded down to the symbol minimum. This input overrides the quantity in strategy Properties. Reversals close the existing position and open this quantity in the new direction.")
+float entryQuantity = math.floor(entryQuantityInput / syminfo.mincontract) * syminfo.mincontract
+
+string GROUP_CASH = "V4 Maximum Stop Loss"
+bool enableCashLossCap = input.bool(true, "Enable Maximum Cash Loss", group=GROUP_CASH)
+float maximumCashLoss = input.float(500, "Maximum Loss (account currency)", minval=1, step=25, group=GROUP_CASH, tooltip="Default 500 USD per open position. Uses strategy account currency. Cash protection remains enabled if Use Profit / Stop is disabled. A stop cannot guarantee this amount on gaps/slippage; fees are excluded.")
+bool showCashLossBox = input.bool(true, "Show Maximum Loss Box", group=GROUP_CASH, tooltip="Hide the box without disabling the cap. Use Enable Maximum Cash Loss to turn off protection.")
+string cashBoxPosition = input.string("Bottom Left", "Loss Box Position", options=["Bottom Left", "Bottom Right", "Top Left", "Top Right"], group=GROUP_CASH)
+
+f_cashStopDistance(float quantity) =>
+    float tickValue = quantity * syminfo.pointvalue * syminfo.mintick
+    float cashTicks = tickValue > 0 ? math.floor(strategy.convert_to_symbol(maximumCashLoss) / tickValue) : na
+    cashTicks * syminfo.mintick
+
+float proposedCashDistance = f_cashStopDistance(entryQuantity)
+bool entryQuantityReady = entryQuantity >= syminfo.mincontract and (not enableCashLossCap or (not na(proposedCashDistance) and proposedCashDistance >= syminfo.mintick))
+// Entries are skipped when the chosen size cannot fit even a one-tick cash stop.
+// ============================================================================
+// V4 LORENTZIAN CLASSIFICATION — OPTIONAL ENTRY CONFIRMATION
+// Feature normalization and logarithmic distance adapted from jdehorty.
+// Uses JDE-style chronological ANN acceptance and a persistent bounded vote queue.
+// The rolling history is bounded, current-query samples are excluded, and fill
+// callbacks do not create extra samples or fresh ML entry decisions.
+// ============================================================================
+string GROUP_LC = "V4 Lorentzian Classification"
+bool useLCFilter = input.bool(true, "Enable LC Direction Filter", group=GROUP_LC, tooltip="Master switch for LC classification and its ML prediction confirmation. OFF bypasses both, leaving V3 filters plus any enabled EMA/SMA filters.")
+int lcNeighborsCount = input.int(8, "Neighbor Count", minval=1, maxval=100, group=GROUP_LC)
+int lcHistoryBars = input.int(2000, "Maximum Training History (bars)", minval=100, maxval=5000, group=GROUP_LC, tooltip="Rolling past-bar window for ANN candidates. Buffers never exceed this size. Large histories increase computation time.")
+int lcFeatureCount = input.int(5, "Feature Slots to Consider", minval=1, maxval=5, group=GROUP_LC, tooltip="Use the first N feature slots, then apply their individual Enable switches. At least one considered slot must be enabled when LC is on.")
+float lcTrainingSource = input.source(close, "Training Label Source", group=GROUP_LC)
+
+string GROUP_PREDICTION = "V4 ML Prediction Confirmation"
+bool useMLPredictionFilter = input.bool(true, "Enable ML Prediction Filter", group=GROUP_PREDICTION, tooltip="When LC is enabled, require a current net vote score in the trade direction. OFF uses the LC direction state alone, which persists through zero votes. The LC master switch disables both checks.")
+int minMLPredictionVotes = input.int(1, "Minimum Net Directional Votes", minval=1, maxval=100, group=GROUP_PREDICTION, tooltip="Long: prediction >= this value. Short: prediction <= its negative. Must not exceed Neighbor Count when this filter is enabled. This is a vote threshold, not a probability of profit.")
+
+string GROUP_LC_FEATURES = "V4 LC Feature Engineering"
+bool lcEnableFeature1 = input.bool(true, "Enable Feature 1", group=GROUP_LC_FEATURES, inline="f1")
+string lcFeature1Type = input.string("RSI", "Type", options=["RSI", "WT", "CCI", "ADX"], group=GROUP_LC_FEATURES, inline="f1")
+int lcFeature1A = input.int(14, "Parameter A", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p1")
+int lcFeature1B = input.int(1, "Parameter B", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p1")
+bool lcEnableFeature2 = input.bool(true, "Enable Feature 2", group=GROUP_LC_FEATURES, inline="f2")
+string lcFeature2Type = input.string("WT", "Type", options=["RSI", "WT", "CCI", "ADX"], group=GROUP_LC_FEATURES, inline="f2")
+int lcFeature2A = input.int(10, "Parameter A", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p2")
+int lcFeature2B = input.int(11, "Parameter B", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p2")
+bool lcEnableFeature3 = input.bool(true, "Enable Feature 3", group=GROUP_LC_FEATURES, inline="f3")
+string lcFeature3Type = input.string("CCI", "Type", options=["RSI", "WT", "CCI", "ADX"], group=GROUP_LC_FEATURES, inline="f3")
+int lcFeature3A = input.int(20, "Parameter A", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p3")
+int lcFeature3B = input.int(1, "Parameter B", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p3")
+bool lcEnableFeature4 = input.bool(true, "Enable Feature 4", group=GROUP_LC_FEATURES, inline="f4")
+string lcFeature4Type = input.string("ADX", "Type", options=["RSI", "WT", "CCI", "ADX"], group=GROUP_LC_FEATURES, inline="f4")
+int lcFeature4A = input.int(20, "Parameter A", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p4")
+int lcFeature4B = input.int(2, "Parameter B (ADX ignores B)", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p4")
+bool lcEnableFeature5 = input.bool(true, "Enable Feature 5", group=GROUP_LC_FEATURES, inline="f5")
+string lcFeature5Type = input.string("RSI", "Type", options=["RSI", "WT", "CCI", "ADX"], group=GROUP_LC_FEATURES, inline="f5")
+int lcFeature5A = input.int(9, "Parameter A", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p5")
+int lcFeature5B = input.int(1, "Parameter B", minval=1, maxval=200, group=GROUP_LC_FEATURES, inline="p5")
+
+string GROUP_EMA = "V4 EMA Entry Filter"
+bool useEMAEntryFilter = input.bool(true, "Enable EMA Entry Filter", group=GROUP_EMA)
+int emaEntryLength = input.int(200, "EMA Length", minval=1, maxval=2000, group=GROUP_EMA)
+bool showEMAEntryLine = input.bool(true, "Show EMA Line", group=GROUP_EMA)
+string GROUP_SMA = "V4 SMA Entry Filter"
+bool useSMAEntryFilter = input.bool(true, "Enable SMA Entry Filter", group=GROUP_SMA)
+int smaEntryLength = input.int(200, "SMA Length", minval=1, maxval=2000, group=GROUP_SMA)
+bool showSMAEntryLine = input.bool(true, "Show SMA Line", group=GROUP_SMA)
+string GROUP_ML_DISPLAY = "V4 Filter Display"
+bool showMLFilterStats = input.bool(true, "Show New Filter Statistics", group=GROUP_ML_DISPLAY)
+bool showMLDataWindow = input.bool(true, "Show ML Score in Data Window", group=GROUP_ML_DISPLAY)
+
+f_lcFeature(simple string featureType, simple int parameterA, simple int parameterB) =>
+    switch featureType
+        "RSI" => ml.n_rsi(close, parameterA, parameterB)
+        "WT" => ml.n_wt(hlc3, parameterA, parameterB)
+        "CCI" => ml.n_cci(close, parameterA, parameterB)
+        "ADX" => ml.n_adx(high, low, close, parameterA)
+        => na
+
+// Evaluate every execution so TA series histories remain consistent.
+float lcFeature1 = f_lcFeature(lcFeature1Type, lcFeature1A, lcFeature1B)
+float lcFeature2 = f_lcFeature(lcFeature2Type, lcFeature2A, lcFeature2B)
+float lcFeature3 = f_lcFeature(lcFeature3Type, lcFeature3A, lcFeature3B)
+float lcFeature4 = f_lcFeature(lcFeature4Type, lcFeature4A, lcFeature4B)
+float lcFeature5 = f_lcFeature(lcFeature5Type, lcFeature5A, lcFeature5B)
+bool lcUse1 = lcFeatureCount >= 1 and lcEnableFeature1
+bool lcUse2 = lcFeatureCount >= 2 and lcEnableFeature2
+bool lcUse3 = lcFeatureCount >= 3 and lcEnableFeature3
+bool lcUse4 = lcFeatureCount >= 4 and lcEnableFeature4
+bool lcUse5 = lcFeatureCount >= 5 and lcEnableFeature5
+int lcActiveFeatureCount = (lcUse1 ? 1 : 0) + (lcUse2 ? 1 : 0) + (lcUse3 ? 1 : 0) + (lcUse4 ? 1 : 0) + (lcUse5 ? 1 : 0)
+bool lcFeaturesReady = (not lcUse1 or not na(lcFeature1)) and (not lcUse2 or not na(lcFeature2)) and (not lcUse3 or not na(lcFeature3)) and (not lcUse4 or not na(lcFeature4)) and (not lcUse5 or not na(lcFeature5))
+
+if barstate.isfirst and useLCFilter
+    if lcActiveFeatureCount == 0
+        runtime.error("KAIROS V4: enable at least one considered LC feature, or turn off Enable LC Direction Filter.")
+    if useMLPredictionFilter and minMLPredictionVotes > lcNeighborsCount
+        runtime.error("KAIROS V4: Minimum Net Directional Votes cannot exceed Neighbor Count. Lower the threshold or disable ML Prediction Filter.")
+
+// Primitive varip arrays/state survive order-fill recalculations and rollback.
+varip array<float> lcHistory1 = array.new<float>()
+varip array<float> lcHistory2 = array.new<float>()
+varip array<float> lcHistory3 = array.new<float>()
+varip array<float> lcHistory4 = array.new<float>()
+varip array<float> lcHistory5 = array.new<float>()
+varip array<int> lcHistoryLabels = array.new<int>()
+varip array<int> lcHistoryBarIds = array.new<int>()
+varip array<float> lcDistances = array.new<float>()
+varip array<int> lcVotes = array.new<int>()
+varip array<int> lcVoteBarIds = array.new<int>()
+varip int lcLastProcessedBar = na
+varip int lcPredictionBar = na
+varip int lcPrediction = 0
+varip int lcDirection = 0
+varip float lcLastObservedPosition = 0.0
+varip int lcLastObservedClosedTrades = 0
+bool lcFillRecalculation = strategy.position_size != lcLastObservedPosition or strategy.closedtrades != lcLastObservedClosedTrades
+lcLastObservedPosition := strategy.position_size
+lcLastObservedClosedTrades := strategy.closedtrades
+
+f_lcDistance(int index) =>
+    float distance = 0.0
+    if lcUse1
+        distance += math.log(1 + math.abs(lcFeature1 - array.get(lcHistory1, index)))
+    if lcUse2
+        distance += math.log(1 + math.abs(lcFeature2 - array.get(lcHistory2, index)))
+    if lcUse3
+        distance += math.log(1 + math.abs(lcFeature3 - array.get(lcHistory3, index)))
+    if lcUse4
+        distance += math.log(1 + math.abs(lcFeature4 - array.get(lcHistory4, index)))
+    if lcUse5
+        distance += math.log(1 + math.abs(lcFeature5 - array.get(lcHistory5, index)))
+    distance
+
+if useLCFilter and barstate.isconfirmed and not lcFillRecalculation and (na(lcLastProcessedBar) or lcLastProcessedBar != bar_index)
+    lcLastProcessedBar := bar_index
+    lcPredictionBar := na
+    if lcFeaturesReady and not na(lcTrainingSource[4]) and not na(lcTrainingSource)
+        int oldestAllowedBar = math.max(0, bar_index - lcHistoryBars)
+        // Expire votes whose source has fallen outside the rolling bar window.
+        int expiredVoteIndex = array.size(lcVotes) - 1
+        while expiredVoteIndex >= 0
+            if array.get(lcVoteBarIds, expiredVoteIndex) < oldestAllowedBar
+                array.remove(lcVotes, expiredVoteIndex)
+                array.remove(lcDistances, expiredVoteIndex)
+                array.remove(lcVoteBarIds, expiredVoteIndex)
+            expiredVoteIndex -= 1
+
+        int candidateCount = array.size(lcHistoryLabels)
+        float lastDistance = -1.0
+        if candidateCount > 0
+            for candidateIndex = 0 to candidateCount - 1
+                int candidateBar = array.get(lcHistoryBarIds, candidateIndex)
+                // Preserve JDE's skip of indices divisible by four. Search only
+                // previous samples; the current query is appended AFTER voting.
+                if candidateBar >= oldestAllowedBar and candidateBar < bar_index and candidateBar % 4 != 0
+                    float distance = f_lcDistance(candidateIndex)
+                    if not na(distance) and distance >= lastDistance
+                        lastDistance := distance
+                        array.push(lcDistances, distance)
+                        array.push(lcVotes, array.get(lcHistoryLabels, candidateIndex))
+                        array.push(lcVoteBarIds, candidateBar)
+                        if array.size(lcVotes) > lcNeighborsCount
+                            int thresholdIndex = math.min(array.size(lcDistances) - 1, int(math.round(lcNeighborsCount * 3.0 / 4.0)))
+                            lastDistance := array.get(lcDistances, thresholdIndex)
+                            array.shift(lcDistances)
+                            array.shift(lcVotes)
+                            array.shift(lcVoteBarIds)
+
+        lcPrediction := array.size(lcVotes) > 0 ? int(array.sum(lcVotes)) : 0
+        lcDirection := lcPrediction > 0 ? 1 : lcPrediction < 0 ? -1 : lcDirection
+        if candidateCount >= lcNeighborsCount and array.size(lcVotes) == lcNeighborsCount
+            lcPredictionBar := bar_index
+
+        // Published JDE labeling convention, retained verbatim with long=1,
+        // short=-1: source[4] < source => short; source[4] > source => long.
+        // These are known historical labels, never future-bar references.
+        int trainingLabel = lcTrainingSource[4] < lcTrainingSource ? -1 : lcTrainingSource[4] > lcTrainingSource ? 1 : 0
+        array.push(lcHistory1, lcFeature1)
+        array.push(lcHistory2, lcFeature2)
+        array.push(lcHistory3, lcFeature3)
+        array.push(lcHistory4, lcFeature4)
+        array.push(lcHistory5, lcFeature5)
+        array.push(lcHistoryLabels, trainingLabel)
+        array.push(lcHistoryBarIds, bar_index)
+        if array.size(lcHistoryLabels) > lcHistoryBars
+            array.shift(lcHistory1)
+            array.shift(lcHistory2)
+            array.shift(lcHistory3)
+            array.shift(lcHistory4)
+            array.shift(lcHistory5)
+            array.shift(lcHistoryLabels)
+            array.shift(lcHistoryBarIds)
+
+int lcNeighborsUsed = array.size(lcVotes)
+bool lcModelReady = useLCFilter and not na(lcPredictionBar) and lcPredictionBar == bar_index and lcNeighborsUsed == lcNeighborsCount
+bool lcEntryReady = lcModelReady and not lcFillRecalculation
+float lcVoteStrength = lcNeighborsUsed > 0 ? math.abs(lcPrediction) * 100.0 / lcNeighborsUsed : na
+bool longLCFilterPass = not useLCFilter or (lcEntryReady and lcDirection == 1)
+bool shortLCFilterPass = not useLCFilter or (lcEntryReady and lcDirection == -1)
+bool longMLPredictionPass = not useLCFilter or not useMLPredictionFilter or (lcEntryReady and lcPrediction >= minMLPredictionVotes)
+bool shortMLPredictionPass = not useLCFilter or not useMLPredictionFilter or (lcEntryReady and lcPrediction <= -minMLPredictionVotes)
+
+float emaEntryValue = ta.ema(close, emaEntryLength)
+float smaEntryValue = ta.sma(close, smaEntryLength)
+bool longEMAEntryPass = not useEMAEntryFilter or (not na(emaEntryValue) and close > emaEntryValue)
+bool shortEMAEntryPass = not useEMAEntryFilter or (not na(emaEntryValue) and close < emaEntryValue)
+bool longSMAEntryPass = not useSMAEntryFilter or (not na(smaEntryValue) and close > smaEntryValue)
+bool shortSMAEntryPass = not useSMAEntryFilter or (not na(smaEntryValue) and close < smaEntryValue)
+bool longV4FiltersPass = longLCFilterPass and longMLPredictionPass and longEMAEntryPass and longSMAEntryPass
+bool shortV4FiltersPass = shortLCFilterPass and shortMLPredictionPass and shortEMAEntryPass and shortSMAEntryPass
+plot(useEMAEntryFilter and showEMAEntryLine ? emaEntryValue : na, title="KAIROS V4 EMA Entry Filter", color=color.new(cGold, 25), linewidth=1)
+plot(useSMAEntryFilter and showSMAEntryLine ? smaEntryValue : na, title="KAIROS V4 SMA Entry Filter", color=color.new(cSilver, 25), linewidth=1)
+plot(useLCFilter and showMLDataWindow and lcModelReady ? lcPrediction : na, title="KAIROS V4 ML Prediction", display=display.data_window)
+plot(useLCFilter and showMLDataWindow and lcModelReady ? lcVoteStrength : na, title="KAIROS V4 ML Vote Strength (%)", display=display.data_window)
+// ============================================================================
+// END V4 FILTERS — V3 ENTRY TRIGGERS AND EXIT EXECUTION CONTINUE BELOW
+// ============================================================================
+
+// ============================================================================
+// ENTRY CONDITIONS
+//
+// Kernel color change = trigger.
+// Slope + Volatility Push = confirmations.
+// ============================================================================
+bool longEntrySignal = (
+     enableLongs and
+     inTradingSession and
+     kernelBullishFlip and
+     longSlopePass and
+     bullPushConfirmed and
+     longV4FiltersPass
+)
+bool shortEntrySignal = (
+     enableShorts and
+     inTradingSession and
+     kernelBearishFlip and
+     shortSlopePass and
+     bearPushConfirmed and
+     shortV4FiltersPass
+)
+bool canEnterLong = (
+     longEntrySignal and
+     strategy.position_size <= 0 and
+     entryQuantityReady
+)
+bool canEnterShort = (
+     shortEntrySignal and
+     strategy.position_size >= 0 and
+     entryQuantityReady
+)
+if canEnterLong
+    strategy.entry(
+         "KAIROS V4 Long",
+         strategy.long,
+         qty=entryQuantity,
+         comment="KAIROS V4 LONG",
+         alert_message="KAIROS LC V4 LONG | {{ticker}} @ {{strategy.order.price}}"
+    )
+else if canEnterShort
+    strategy.entry(
+         "KAIROS V4 Short",
+         strategy.short,
+         qty=entryQuantity,
+         comment="KAIROS V4 SHORT",
+         alert_message="KAIROS LC V4 SHORT | {{ticker}} @ {{strategy.order.price}}"
+    )
+// ============================================================================
+// LOCK RISK LEVELS AFTER ACTUAL FILL
+// ============================================================================
+bool newLongPosition = (
+     strategy.position_size > 0 and
+     strategy.position_size[1] <= 0
+)
+bool newShortPosition = (
+     strategy.position_size < 0 and
+     strategy.position_size[1] >= 0
+)
+if newLongPosition
+    float riskDistance = (
+         riskAtr *
+         stopAtrMultiple
+    )
+    longStop := (
+         strategy.position_avg_price -
+         riskDistance
+    )
+    longTarget := (
+         strategy.position_avg_price +
+         riskDistance *
+         rewardRiskMultiple
+    )
+    if not useRiskManagement
+        longStop := na
+        longTarget := na
+    if enableCashLossCap
+        float cashStop = strategy.position_avg_price - f_cashStopDistance(math.abs(strategy.position_size))
+        longStop := na(longStop) ? cashStop : math.max(longStop, cashStop)
+    shortStop := na
+    shortTarget := na
+if newShortPosition
+    float riskDistance = (
+         riskAtr *
+         stopAtrMultiple
+    )
+    shortStop := (
+         strategy.position_avg_price +
+         riskDistance
+    )
+    shortTarget := (
+         strategy.position_avg_price -
+         riskDistance *
+         rewardRiskMultiple
+    )
+    if not useRiskManagement
+        shortStop := na
+        shortTarget := na
+    if enableCashLossCap
+        float cashStop = strategy.position_avg_price + f_cashStopDistance(math.abs(strategy.position_size))
+        shortStop := na(shortStop) ? cashStop : math.min(shortStop, cashStop)
+    longStop := na
+    longTarget := na
+// ============================================================================
+// 2R / ATR / CASH EXITS
+// ============================================================================
+if (
+     (useRiskManagement or enableCashLossCap) and
+     strategy.position_size > 0 and
+     not na(longStop)
+)
+    strategy.exit(
+         "KAIROS V4 Long Risk Exit",
+         from_entry="KAIROS V4 Long",
+         stop=longStop,
+         limit=longTarget,
+         comment="KAIROS V4 LONG PROFIT/ATR/CASH EXIT",
+         alert_message="KAIROS LC V4 LONG EXIT | {{ticker}} @ {{strategy.order.price}}"
+    )
+if (
+     (useRiskManagement or enableCashLossCap) and
+     strategy.position_size < 0 and
+     not na(shortStop)
+)
+    strategy.exit(
+         "KAIROS V4 Short Risk Exit",
+         from_entry="KAIROS V4 Short",
+         stop=shortStop,
+         limit=shortTarget,
+         comment="KAIROS V4 SHORT PROFIT/ATR/CASH EXIT",
+         alert_message="KAIROS LC V4 SHORT EXIT | {{ticker}} @ {{strategy.order.price}}"
+    )
+// ============================================================================
+// OPPOSITE KERNEL FLIP EXIT
+//
+// If the opposite flip also passes VP + slope confirmation,
+// strategy.entry() handles the reversal.
+//
+// If it does not qualify as a reversal entry, the current position is closed.
+// ============================================================================
+if (
+     exitOnOppositeKernelFlip and
+     strategy.position_size > 0 and
+     kernelBearishFlip and
+     not canEnterShort
+)
+    strategy.close(
+         "KAIROS V4 Long",
+         comment="KAIROS V4 OPPOSITE KERNEL EXIT",
+         alert_message="KAIROS LC V4 CLOSE LONG - KERNEL FLIP | {{ticker}} @ {{strategy.order.price}}"
+    )
+if (
+     exitOnOppositeKernelFlip and
+     strategy.position_size < 0 and
+     kernelBullishFlip and
+     not canEnterLong
+)
+    strategy.close(
+         "KAIROS V4 Short",
+         comment="KAIROS V4 OPPOSITE KERNEL EXIT",
+         alert_message="KAIROS LC V4 CLOSE SHORT - KERNEL FLIP | {{ticker}} @ {{strategy.order.price}}"
+    )
+// ============================================================================
+// SESSION CUTOFF
+// ============================================================================
+if (
+     closeAtSessionEnd and
+     sessionCutoffBar and
+     strategy.position_size != 0
+)
+    strategy.close_all(
+         comment="KAIROS V4 SESSION CUTOFF",
+         immediately=true,
+         alert_message="KAIROS LC V4 SESSION CUTOFF | {{ticker}} @ {{strategy.order.price}}"
+    )
+// ============================================================================
+// RESET RISK LEVELS AFTER EXIT
+// ============================================================================
+if (
+     strategy.position_size == 0 and
+     strategy.position_size[1] != 0
+)
+    longStop := na
+    longTarget := na
+    shortStop := na
+    shortTarget := na
+// ============================================================================
+// CHART SIGNALS
+// ============================================================================
+plotshape(
+     longEntrySignal,
+     title="KAIROS V4 Long Signal",
+     style=shape.labelup,
+     location=location.belowbar,
+     color=cGreen,
+     textcolor=color.white,
+     size=size.small,
+     text="K L"
+)
+plotshape(
+     shortEntrySignal,
+     title="KAIROS V4 Short Signal",
+     style=shape.labeldown,
+     location=location.abovebar,
+     color=cRed,
+     textcolor=color.white,
+     size=size.small,
+     text="K S"
+)
+plot(
+     showRiskLevels and
+     strategy.position_size > 0
+     ? longStop
+     : na,
+     title="Long Stop",
+     color=color.new(cRed, 10),
+     linewidth=1,
+     style=plot.style_linebr
+)
+plot(
+     showRiskLevels and
+     strategy.position_size > 0
+     ? longTarget
+     : na,
+     title="Long 2R Target",
+     color=color.new(cGreen, 10),
+     linewidth=1,
+     style=plot.style_linebr
+)
+plot(
+     showRiskLevels and
+     strategy.position_size < 0
+     ? shortStop
+     : na,
+     title="Short Stop",
+     color=color.new(cRed, 10),
+     linewidth=1,
+     style=plot.style_linebr
+)
+plot(
+     showRiskLevels and
+     strategy.position_size < 0
+     ? shortTarget
+     : na,
+     title="Short 2R Target",
+     color=color.new(cGreen, 10),
+     linewidth=1,
+     style=plot.style_linebr
+)
+// ============================================================================
+// STRATEGY STATISTICS TABLE
+// ============================================================================
+string GROUP_STATS = "Statistics Table"
+bool showStats = input.bool(
+     true,
+     "Show Statistics",
+     group=GROUP_STATS
+)
+string statsPosition = input.string(
+     "Top Right",
+     "Table Position",
+     options=["Top Right", "Bottom Right", "Top Left", "Bottom Left"],
+     group=GROUP_STATS
+)
+string statsFont = input.string(
+     "Normal",
+     "Font Size",
+     options=["Small", "Normal", "Large"],
+     group=GROUP_STATS
+)
+string statsFontFamilyInput = input.string("Default", "Table Font Family", options=["Default", "Monospace"], group=GROUP_STATS)
+string statsFontFamily = statsFontFamilyInput == "Monospace" ? font.family_monospace : font.family_default
+statsTablePosition = switch statsPosition
+    "Bottom Right" => position.bottom_right
+    "Top Left" => position.top_left
+    "Bottom Left" => position.bottom_left
+    => position.top_right
+statsTextSize = switch statsFont
+    "Small" => size.small
+    "Large" => size.large
+    => size.normal
+color statsBackground = color.new(cNavy, 10)
+color statsHeader = color.new(cNavy, 10)
+color statsBorder = color.new(cGold, 70)
+var table statsTable = table.new(
+     statsTablePosition,
+     2,
+     17,
+     bgcolor=statsBackground,
+     frame_color=color.new(cGold, 45),
+     frame_width=2,
+     border_color=statsBorder,
+     border_width=1
+)
+// Text formatting helpers.
+f_kairosNumber(float value) =>
+    na(value) ? "—" : str.tostring(value, "#.##")
+f_kairosMoney(float value) =>
+    f_kairosNumber(value) + " " + strategy.account_currency
+// Write one table row.
+f_kairosStatsRow(
+     table target,
+     int row,
+     string labelText,
+     string valueText,
+     color valueColor,
+     string fontSize
+) =>
+    table.cell(
+         target,
+         0,
+         row,
+         labelText,
+         text_color=cLabel,
+         text_halign=text.align_left,
+         text_size=fontSize,
+         text_font_family=statsFontFamily,
+         bgcolor=row % 2 == 0 ? color.new(cDarkNavy, 75) : color.new(cNavy, 75)
+    )
+    table.cell(
+         target,
+         1,
+         row,
+         valueText,
+         text_color=valueColor,
+         text_halign=text.align_right,
+         text_size=fontSize,
+         text_font_family=statsFontFamily,
+         bgcolor=row % 2 == 0 ? color.new(cDarkNavy, 75) : color.new(cNavy, 75)
+    )
+// Includes the last historical bar and subsequent realtime updates.
+if barstate.islastconfirmedhistory or barstate.islast
+    if showStats
+        int closedTrades = strategy.closedtrades
+        int winningTrades = strategy.wintrades
+        int losingTrades = strategy.losstrades
+        int evenTrades = strategy.eventrades
+        float winRate = closedTrades > 0 ? winningTrades * 100.0 / closedTrades : na
+        float grossLossAbs = math.abs(strategy.grossloss)
+        float profitFactor = grossLossAbs > 0 ? strategy.grossprofit / grossLossAbs : na
+        float averageTrade = closedTrades > 0 ? strategy.netprofit / closedTrades : na
+        float netReturn = strategy.initial_capital > 0 ? strategy.netprofit / strategy.initial_capital * 100.0 : na
+        string profitFactorText = grossLossAbs > 0 ? f_kairosNumber(profitFactor) : strategy.grossprofit > 0 ? "No losses" : "—"
+        string positionText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+        color positionColor = strategy.position_size > 0 ? cGreen : strategy.position_size < 0 ? cRed : color.silver
+        color profitColor = strategy.netprofit > 0 ? cGreen : strategy.netprofit < 0 ? cRed : color.silver
+        color averageColor = na(averageTrade) ? color.silver : averageTrade >= 0 ? cGreen : cRed
+        table.cell(
+             statsTable,
+             0,
+             0,
+             "KAIROS LC V4",
+             tooltip=showKairosStory ? KAIROS_STORY : "",
+             bgcolor=statsHeader,
+             text_color=cGold,
+             text_halign=text.align_left,
+             text_size=statsTextSize,
+             text_font_family=statsFontFamily
+        )
+        table.cell(
+             statsTable,
+             1,
+             0,
+             "STRATEGY STATS",
+             bgcolor=statsHeader,
+             text_color=cSilver,
+             text_halign=text.align_right,
+             text_size=statsTextSize,
+             text_font_family=statsFontFamily
+        )
+        f_kairosStatsRow(statsTable, 1, "Closed Trades", str.tostring(closedTrades), color.white, statsTextSize)
+        f_kairosStatsRow(statsTable, 2, "Wins / Losses", str.tostring(winningTrades) + " / " + str.tostring(losingTrades), color.white, statsTextSize)
+        f_kairosStatsRow(statsTable, 3, "Breakeven Trades", str.tostring(evenTrades), color.silver, statsTextSize)
+        f_kairosStatsRow(statsTable, 4, "Win Rate", na(winRate) ? "—" : f_kairosNumber(winRate) + "%", color.white, statsTextSize)
+        f_kairosStatsRow(statsTable, 5, "Profit Factor", profitFactorText, color.white, statsTextSize)
+        f_kairosStatsRow(statsTable, 6, "Net Profit", f_kairosMoney(strategy.netprofit), profitColor, statsTextSize)
+        f_kairosStatsRow(statsTable, 7, "Net Return", na(netReturn) ? "—" : f_kairosNumber(netReturn) + "%", profitColor, statsTextSize)
+        f_kairosStatsRow(statsTable, 8, "Average Trade", na(averageTrade) ? "—" : f_kairosMoney(averageTrade), averageColor, statsTextSize)
+        f_kairosStatsRow(statsTable, 9, "Max Drawdown", f_kairosMoney(strategy.max_drawdown), cRed, statsTextSize)
+        f_kairosStatsRow(statsTable, 10, "Position", positionText, positionColor, statsTextSize)
+        f_kairosStatsRow(statsTable, 11, "Target", useRiskManagement ? f_kairosNumber(rewardRiskMultiple) + "R" : "Disabled", color.white, statsTextSize)
+        if showMLFilterStats
+            string lcDirectionText = not useLCFilter ? "DISABLED" : not lcModelReady ? "WARMUP / NO DATA" : lcDirection == 1 ? "LONG" : lcDirection == -1 ? "SHORT" : "NEUTRAL"
+            color lcDirectionColor = useLCFilter and lcModelReady ? (lcDirection == 1 ? cGreen : lcDirection == -1 ? cRed : cGray) : cGray
+            string mlVoteText = not useLCFilter ? "DISABLED" : not lcModelReady ? "—" : str.tostring(lcPrediction) + " / " + str.tostring(lcNeighborsUsed)
+            mlVoteText += useLCFilter and not useMLPredictionFilter ? " · threshold OFF" : ""
+            string emaFilterText = not useEMAEntryFilter ? "DISABLED" : na(emaEntryValue) ? "WARMUP" : close > emaEntryValue ? "BULL" : close < emaEntryValue ? "BEAR" : "NEUTRAL"
+            string smaFilterText = not useSMAEntryFilter ? "DISABLED" : na(smaEntryValue) ? "WARMUP" : close > smaEntryValue ? "BULL" : close < smaEntryValue ? "BEAR" : "NEUTRAL"
+            f_kairosStatsRow(statsTable, 12, "LC Direction", lcDirectionText, lcDirectionColor, statsTextSize)
+            f_kairosStatsRow(statsTable, 13, "ML Net Votes", mlVoteText, lcDirectionColor, statsTextSize)
+            f_kairosStatsRow(statsTable, 14, "Neighbors / Features", not useLCFilter ? "DISABLED" : str.tostring(lcNeighborsUsed) + "/" + str.tostring(lcNeighborsCount) + " · " + str.tostring(lcActiveFeatureCount) + " features", color.white, statsTextSize)
+            f_kairosStatsRow(statsTable, 15, "EMA " + str.tostring(emaEntryLength), emaFilterText, useEMAEntryFilter ? (close > emaEntryValue ? cGreen : close < emaEntryValue ? cRed : cGray) : cGray, statsTextSize)
+            f_kairosStatsRow(statsTable, 16, "SMA " + str.tostring(smaEntryLength), smaFilterText, useSMAEntryFilter ? (close > smaEntryValue ? cGreen : close < smaEntryValue ? cRed : cGray) : cGray, statsTextSize)
+        else
+            table.clear(statsTable, 0, 12, 1, 16)
+    else
+        table.clear(statsTable, 0, 0, 1, 16)
+// ============================================================================
+// ============================================================================
+// EDITABLE BOTTOM WATERMARK — BELLEROPHONTES GOLD THEME
+// ============================================================================
+string GROUP_FOOTER = "Bottom Watermark"
+bool showBottomWatermark = input.bool(true, "Show Bottom Watermark", group=GROUP_FOOTER)
+string bottomWatermarkText = input.string("KAIROS · LC SWING ENGINE V4 · JXS_918", "Bottom Text", group=GROUP_FOOTER)
+int bottomWatermarkSize = input.int(14, "Bottom Font Size", minval=8, maxval=36, group=GROUP_FOOTER)
+string bottomWatermarkFamilyInput = input.string("Default", "Bottom Font Family", options=["Default", "Monospace"], group=GROUP_FOOTER)
+color bottomWatermarkColor = input.color(color.new(#FFD700, 45), "Bottom Text Color", group=GROUP_FOOTER)
+string bottomWatermarkFamily = bottomWatermarkFamilyInput == "Monospace" ? font.family_monospace : font.family_default
+var table bottomWatermark = table.new(position.bottom_center, 1, 1)
+if barstate.islastconfirmedhistory or barstate.islast
+    if showBottomWatermark
+        table.cell(bottomWatermark, 0, 0, bottomWatermarkText, text_color=bottomWatermarkColor, text_size=bottomWatermarkSize, text_font_family=bottomWatermarkFamily, bgcolor=color.new(color.black, 100))
+    else
+        table.clear(bottomWatermark, 0, 0, 0, 0)
+// FILLED TRADE ENTRY ALERTS
+//
+// Requires calc_on_order_fills=true, which your strategy already uses.
+// Alerts fire for actual strategy entry fills, not unfilled setup signals.
+// varip preserves duplicate protection across same-bar fill recalculations.
+// ============================================================================
+string GROUP_TRADE_ALERTS = "Trade Entry Alerts"
+bool enableTradeAlerts = input.bool(
+     true,
+     "Enable Filled Entry Alerts",
+     group=GROUP_TRADE_ALERTS
+)
+bool alertLongTrades = input.bool(
+     true,
+     "Alert Long Entries",
+     group=GROUP_TRADE_ALERTS,
+     inline="direction"
+)
+bool alertShortTrades = input.bool(
+     true,
+     "Alert Short Entries",
+     group=GROUP_TRADE_ALERTS,
+     inline="direction"
+)
+varip string lastKairosEntryAlertKey = ""
+if strategy.position_size != 0 and strategy.opentrades > 0
+    int openTradeIndex = strategy.opentrades - 1
+    int entryBar = strategy.opentrades.entry_bar_index(openTradeIndex)
+    int entryTime = strategy.opentrades.entry_time(openTradeIndex)
+    float actualEntryPrice = strategy.opentrades.entry_price(openTradeIndex)
+    bool filledLong = strategy.position_size > 0
+    string directionText = filledLong ? "LONG" : "SHORT"
+    string entryAlertKey = (
+         str.tostring(entryTime) + "|" +
+         str.tostring(strategy.closedtrades) + "|" +
+         directionText
+    )
+    bool entryFilledThisBar = entryBar == bar_index
+    bool entryNotYetAlerted = entryAlertKey != lastKairosEntryAlertKey
+    if entryFilledThisBar and entryNotYetAlerted
+        lastKairosEntryAlertKey := entryAlertKey
+        bool directionEnabled = filledLong ? alertLongTrades : alertShortTrades
+        if barstate.isrealtime and enableTradeAlerts and directionEnabled
+            string entryMessage = (
+                 "KAIROS LC V4 " + directionText + " FILLED" +
+                 " | " + syminfo.tickerid +
+                 " | Timeframe: " + timeframe.period +
+                 " | Entry: " + str.tostring(actualEntryPrice, format.mintick)
+            )
+            alert(
+                 entryMessage,
+                 alert.freq_all
+            )
+
+// ============================================================================
+// V4 MAXIMUM LOSS BOX — MATCHES THE EXISTING NAVY/GOLD THEME AND TABLE FONT
+// ============================================================================
+cashTablePosition = switch cashBoxPosition
+    "Bottom Right" => position.bottom_right
+    "Top Left" => position.top_left
+    "Top Right" => position.top_right
+    => position.bottom_left
+var table cashLossTable = table.new(cashTablePosition, 2, 7, bgcolor=statsBackground, frame_color=color.new(cGold, 45), frame_width=2, border_color=statsBorder, border_width=1)
+if barstate.islastconfirmedhistory or barstate.islast
+    if showCashLossBox
+        float effectiveStop = strategy.position_size > 0 ? longStop : strategy.position_size < 0 ? shortStop : na
+        float protectedLoss = not na(effectiveStop) and strategy.position_size != 0 ? strategy.convert_to_account(math.abs(strategy.position_avg_price - effectiveStop) * math.abs(strategy.position_size) * syminfo.pointvalue) : na
+        table.cell(cashLossTable, 0, 0, "KAIROS LC V4", text_color=cGold, bgcolor=statsHeader, text_size=statsTextSize, text_font_family=statsFontFamily)
+        table.cell(cashLossTable, 1, 0, "LOSS CONTROL", text_color=cSilver, bgcolor=statsHeader, text_size=statsTextSize, text_font_family=statsFontFamily)
+        f_kairosStatsRow(cashLossTable, 1, "Cash Cap", enableCashLossCap ? "ENABLED" : "DISABLED", enableCashLossCap ? cGreen : cGray, statsTextSize)
+        f_kairosStatsRow(cashLossTable, 2, "Maximum Loss", f_kairosMoney(maximumCashLoss), cGold, statsTextSize)
+        f_kairosStatsRow(cashLossTable, 3, "Entry Shares / Qty", str.tostring(entryQuantity), color.white, statsTextSize)
+        f_kairosStatsRow(cashLossTable, 4, "Open P/L", f_kairosMoney(strategy.openprofit), strategy.openprofit >= 0 ? cGreen : cRed, statsTextSize)
+        f_kairosStatsRow(cashLossTable, 5, "Effective Stop", na(effectiveStop) ? "—" : str.tostring(effectiveStop, format.mintick), cRed, statsTextSize)
+        f_kairosStatsRow(cashLossTable, 6, "Loss at Stop", na(protectedLoss) ? "—" : f_kairosMoney(protectedLoss), cRed, statsTextSize)
+    else
+        table.clear(cashLossTable, 0, 0, 1, 6)
+
