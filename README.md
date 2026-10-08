@@ -1,11 +1,11 @@
-# KAIROS LC Swing Engine V3
+# KAIROS LC Swing Engine V4
 
 ![Pine Script](https://img.shields.io/badge/Pine%20Script-v6-blue)
 ![Python](https://img.shields.io/badge/Python-QuantConnect-3776AB)
 ![Platform](https://img.shields.io/badge/Platform-TradingView-black)
 ![License](https://img.shields.io/badge/License-MPL--2.0-purple)
 
-**KAIROS V3** trades intraday kernel flips with slope and directional Volatility Push (VP) confirmation, fixed ATR targets/stops, editable entry shares and an independent cash-loss cap.
+**KAIROS V4** adds switchable Lorentzian classification, ML vote confirmation and EMA/SMA entry filters to V3’s intraday kernel strategy. V3’s slope/VP, fixed ATR targets/stops, editable shares, cash cap, session, alerts and theme are retained.
 
 **Why Kairos?** Kairos personifies the opportune moment in Greek mythology: waiting until direction, confirmation and trading hours align before entering a swing.
 
@@ -13,24 +13,36 @@
 
 [Jdehorty's Lorentzian Classification](https://www.tradingview.com/script/WhBzgfDu-Machine-Learning-Lorentzian-Classification/) compares historical RSI, WaveTrend, CCI and ADX features using approximate neighbor classification. Its `sum(log(1 + abs(feature difference)))` distance compresses large differences when forming directional predictions.
 
-**V3 uses the kernel component of that work.** The full feature/neighbor classifier remains in the legacy DELPHI source; V3 has no neighbor-count, ML-prediction or EMA/SMA entry filter.
+**V4 includes the classifier as an optional entry confirmation**, using JDE’s normalized features, logarithmic distance and chronological ANN-style vote queue. Neighbor count and feature settings are editable. V3 remains available as the kernel-only baseline.
 
-[Nadaraya–Watson regression](https://www.tradingview.com/script/AWNvbPRM-Nadaraya-Watson-Rational-Quadratic-Kernel-Non-Repainting/) estimates price through a kernel-weighted average. V3 uses jdehorty's [KernelFunctions/2](https://www.tradingview.com/script/e0Ek9x99-KernelFunctions/) Rational Quadratic estimate: rising/falling values set direction. Enhanced smoothing instead compares Gaussian and Rational Quadratic estimates, using Gaussian bandwidth `max(1, lookback − lag)`.
+[Nadaraya–Watson regression](https://www.tradingview.com/script/AWNvbPRM-Nadaraya-Watson-Rational-Quadratic-Kernel-Non-Repainting/) estimates price through a kernel-weighted average. V4 retains jdehorty's [KernelFunctions/2](https://www.tradingview.com/script/e0Ek9x99-KernelFunctions/) Rational Quadratic estimate: rising/falling values set direction. Enhanced smoothing instead compares Gaussian and Rational Quadratic estimates, using Gaussian bandwidth `max(1, lookback − lag)`.
 
 ## Trading logic
 
 1. **Trigger:** A new bullish kernel state triggers long; a new bearish state triggers short. No same-direction pyramiding; qualified opposite entries reverse.
-2. **Confirm:** Optional ATR-normalized slope and directional VP must pass. VP scores ATR, candle-range and volume expansion, then checks candle body and close location. The matching push must be within the backward-looking window and newer than the opposing push.
+2. **Confirm:** Enabled LC direction, ML net votes, EMA/SMA, ATR-normalized slope and directional VP must pass. VP scores ATR, candle-range and volume expansion, then checks candle body and close location. The matching push must be within the backward-looking window and newer than the opposing push.
 3. **Session:** Signal-bar closing time must fall inside the New York entry window. Session cutoff optionally liquidates remaining positions at the first bar closing at/after cutoff.
 4. **Protect/exit:** After fills, `1R = ATR × stop multiple`; target distance is `1R × target R`. The tighter ATR/cash stop shares one exit bracket. Optional opposite-flip exits close trades without a qualifying reversal.
 
-V3 uses **chart-timeframe VP and fixed targets**. [V2](KAIROS_V2_Usage.md) separately provides adaptive partial profits and one-minute continuation checks. A VP score of 2 can pass through ATR and range alone; the volume point is not independently mandatory.
+V4 retains **chart-timeframe VP and fixed targets** from V3. [V2](KAIROS_V2_Usage.md) separately provides adaptive partial profits and one-minute continuation checks. A VP score of 2 can pass through ATR and range alone; the volume point is not independently mandatory.
 
-## Parameters
+## V4 filter switches
 
-Pine defaults below come from committed V3 code. Your configured preset comes from the [QuantConnect port](quantconnect/kairos_v3_spy_3min_backtest.py), independently of saved TradingView inputs.
+| New section | Default | Entry requirement |
+| --- | --- | --- |
+| LC Direction Filter | ON; 8 neighbors, 2,000 past bars | Ready LC classification agrees with the kernel flip |
+| ML Prediction Filter | ON; minimum 1 net vote | Long score ≥1; short score ≤−1; subordinate to LC master |
+| Feature Engineering | 5 enabled slots | RSI(14,1), WT(10,11), CCI(20,1), ADX(20), RSI(9,1); each slot editable and switchable |
+| EMA Entry Filter | ON; 200 | Long above EMA; short below EMA |
+| SMA Entry Filter | ON; 200 | Long above SMA; short below SMA |
 
-| Parameter | Pine V3 default | Configured QuantConnect preset |
+Turn off **LC Direction, ML Prediction, EMA Entry and SMA Entry** to restore V3 entry rules. LC master OFF also bypasses its ML prediction check. These filters gate entries; V3's exits are unchanged. New table rows show direction, votes, neighbor usage and moving-average states. [V4 usage and model details](KAIROS_V4_Usage.md) explain labels, history bounds, warmup and tests. Profitability improvements have not been established.
+
+## Inherited parameters
+
+V4 retains these V3 defaults. The configured QuantConnect preset remains a **V3 port**, independent of V4 filters and saved TradingView inputs.
+
+| Parameter | Pine V4 inherited default | QuantConnect V3 preset |
 | --- | --- | --- |
 | Instrument / signal interval | Chart symbol / interval | SPY / 3 minutes |
 | Session / timezone | 09:30–before 15:00 / America/New_York | Same; DST aware |
@@ -57,7 +69,7 @@ A zero VP window requires the flip candle's push; 10 looks backward rather than 
 
 ## Metrics and controls
 
-V3's table uses actual TradingView `strategy.*` results:
+V4's trade table retains actual TradingView `strategy.*` results:
 
 | Metric | Calculation / meaning |
 | --- | --- |
@@ -71,7 +83,7 @@ The navy/gold theme includes kernel/VP markers, stop/target lines and a loss box
 
 Use **Order fills** alerts for order messages; include **alert() function calls** for optional filled-entry notifications, which can duplicate entry messages. Recreate alerts after changes. Pine uses `process_orders_on_close=true` and `calc_on_order_fills=true`; review simulated fills, fees and slippage in Strategy Tester.
 
-## QuantConnect: 0DTE options
+## QuantConnect V3: 0DTE options
 
 The [Python port](quantconnect/kairos_v3_spy_3min_backtest.py) buys closest-ATM **same-day-expiry SPY calls** on bullish signals and **puts** on bearish signals, within a $2,500 premium budget. Missing eligible contracts/quotes skips entry. Signals use 3-minute bars; exits observe one-minute SPY closes.
 
@@ -79,6 +91,7 @@ The preset's `0.45R` target equals `0.675 × SPY ATR(14)`: **an underlying-price
 
 ## Use and attribution
 
-Copy [V3 Pine](KAIROS_LC_Swing_Engine_V3_JXS_918.pine) into TradingView's Pine Editor and add it to an intraday chart. Pine trades the chart symbol; the separate Python port supplies the documented options workflow.
+Copy [V4 Pine](KAIROS_LC_Swing_Engine_V4_JXS_918.pine) into TradingView's Pine Editor and add it to an intraday chart. Pine trades the chart symbol; the separate Python port supplies the documented options workflow.
 
-**Author:** JXS_918 · [@woi-6ix](https://github.com/woi-6ix). Kernel logic adapted from **jdehorty**, under [MPL 2.0](LICENSE). [Third-party notices](THIRD_PARTY_NOTICES.md). Earlier KAIROS/DELPHI sources remain available.
+**Author:** JXS_918 · [@woi-6ix](https://github.com/woi-6ix). LC feature/distance/ANN and kernel logic adapted from **jdehorty**, under [MPL 2.0](LICENSE). [Third-party notices](THIRD_PARTY_NOTICES.md). [V3 source](KAIROS_LC_Swing_Engine_V3_JXS_918.pine) and earlier KAIROS/DELPHI versions remain available.
+
