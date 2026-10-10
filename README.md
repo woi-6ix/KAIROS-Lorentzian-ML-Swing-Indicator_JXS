@@ -5,93 +5,144 @@
 ![Platform](https://img.shields.io/badge/Platform-TradingView-black)
 ![License](https://img.shields.io/badge/License-MPL--2.0-purple)
 
-**KAIROS V4** adds switchable Lorentzian classification, ML vote confirmation and EMA/SMA entry filters to V3’s intraday kernel strategy. V3’s slope/VP, fixed ATR targets/stops, editable shares, cash cap, session, alerts and theme are retained.
+**KAIROS V4 is a TradingView strategy** combining Nadaraya–Watson kernel swing triggers with optional Lorentzian Classification (LC), ML vote confirmation and EMA/SMA entry filters. It retains V3's slope/Volatility Push (VP), fixed ATR exits, editable shares, cash loss control, session, alerts and navy/gold theme.
 
-**Why Kairos?** Kairos personifies the opportune moment in Greek mythology: waiting until direction, confirmation and trading hours align before entering a swing.
+**Why Kairos?** Kairos personifies the opportune moment in Greek mythology. The name reflects waiting until the kernel's direction, enabled confirmations and trading hours align.
 
-## Background
+## Background: Lorentzian Classification and kernel regression
 
-[Jdehorty's Lorentzian Classification](https://www.tradingview.com/script/WhBzgfDu-Machine-Learning-Lorentzian-Classification/) compares historical RSI, WaveTrend, CCI and ADX features using approximate neighbor classification. Its `sum(log(1 + abs(feature difference)))` distance compresses large differences when forming directional predictions.
+[Jdehorty's Lorentzian Classification](https://www.tradingview.com/script/WhBzgfDu-Machine-Learning-Lorentzian-Classification/) compares historical RSI, WaveTrend, CCI and ADX features using approximate neighbor classification. Its distance is:
 
-**V4 includes the classifier as an optional entry confirmation**, using JDE’s normalized features, logarithmic distance and chronological ANN-style vote queue. Neighbor count and feature settings are editable. V3 remains available as the kernel-only baseline.
+```text
+distance = sum(log(1 + abs(current feature - historical feature)))
+```
 
-[Nadaraya–Watson regression](https://www.tradingview.com/script/AWNvbPRM-Nadaraya-Watson-Rational-Quadratic-Kernel-Non-Repainting/) estimates price through a kernel-weighted average. V4 retains jdehorty's [KernelFunctions/2](https://www.tradingview.com/script/e0Ek9x99-KernelFunctions/) Rational Quadratic estimate: rising/falling values set direction. Enhanced smoothing instead compares Gaussian and Rational Quadratic estimates, using Gaussian bandwidth `max(1, lookback − lag)`.
+The logarithm compresses large feature differences, reducing their contribution relative to an uncompressed distance. JDE's event-driven “price-time” analogy motivates handling noise and outliers. KAIROS compares features; it does not ingest news or event schedules.
 
-## Trading logic
+[Nadaraya–Watson regression](https://www.tradingview.com/script/AWNvbPRM-Nadaraya-Watson-Rational-Quadratic-Kernel-Non-Repainting/) estimates price as a weighted average: `sum(weight × price) / sum(weight)`. KAIROS uses JDE's Rational Quadratic kernel to identify swings. Normally, a rising estimate is bullish and a falling estimate bearish. Optional Enhanced Smoothing instead compares a Gaussian estimate with the Rational Quadratic estimate. **The kernel flip triggers a trade; LC confirms it.**
 
-1. **Trigger:** A new bullish kernel state triggers long; a new bearish state triggers short. No same-direction pyramiding; qualified opposite entries reverse.
-2. **Confirm:** Enabled LC direction, ML net votes, EMA/SMA, ATR-normalized slope and directional VP must pass. VP scores ATR, candle-range and volume expansion, then checks candle body and close location. The matching push must be within the backward-looking window and newer than the opposing push.
-3. **Session:** Signal-bar closing time must fall inside the New York entry window. Session cutoff optionally liquidates remaining positions at the first bar closing at/after cutoff.
-4. **Protect/exit:** After fills, `1R = ATR × stop multiple`; target distance is `1R × target R`. The tighter ATR/cash stop shares one exit bracket. Optional opposite-flip exits close trades without a qualifying reversal.
+## ML features and prediction
 
-V4 retains **chart-timeframe VP and fixed targets** from V3. [V2](KAIROS_V2_Usage.md) separately provides adaptive partial profits and one-minute continuation checks. A VP score of 2 can pass through ATR and range alone; the volume point is not independently mandatory.
+Features are normalized through JDE's `MLExtensions/2`. Each slot has an independent Enable checkbox, feature selector and editable parameters.
 
-## V4 filter switches
+| Slot | Default feature | A / B | Information represented |
+| --- | --- | --- | --- |
+| 1 | RSI | 14 / 1 | Momentum |
+| 2 | WaveTrend (WT) | 10 / 11 | Smoothed momentum |
+| 3 | CCI | 20 / 1 | Price deviation / momentum |
+| 4 | ADX | 20 / 2 | Trend strength; B ignored |
+| 5 | RSI | 9 / 1 | Faster momentum |
 
-| New section | Default | Entry requirement |
+**Feature Slots to Consider** uses the first N slots and their Enable switches. Different RSI settings create distinct features. LC requires at least one active feature.
+
+V4 searches prior samples within a bounded rolling history. Its JDE-style chronological ANN loop accepts distances against a moving threshold, skips historical bar indices divisible by four and retains a bounded vote queue. This is an approximate persistent search, rather than a sorted exact k-nearest-neighbor search; samples can be revisited.
+
+The published JDE label convention is retained: `source[4] < source` gives **−1**, `source[4] > source` gives **+1**, equality gives **0**. These labels use a known historical four-bar comparison, not a newly constructed future-return target. The current sample is added **after** prediction, so it cannot vote on itself.
+
+Votes sum to the ML score: positive classifies long, negative short, zero retains direction. ML Prediction confirmation blocks zero/insufficient votes. LC requires completed warmup and a full vote queue. **Vote strength** is `abs(net votes) / votes used × 100`, not a probability of profit.
+
+## Switches and ML defaults
+
+| Section / setting | Default | Effect |
 | --- | --- | --- |
-| LC Direction Filter | ON; 8 neighbors, 2,000 past bars | Ready LC classification agrees with the kernel flip |
-| ML Prediction Filter | ON; minimum 1 net vote | Long score ≥1; short score ≤−1; subordinate to LC master |
-| Feature Engineering | 5 enabled slots | RSI(14,1), WT(10,11), CCI(20,1), ADX(20), RSI(9,1); each slot editable and switchable |
-| EMA Entry Filter | ON; 200 | Long above EMA; short below EMA |
-| SMA Entry Filter | ON; 200 | Long above SMA; short below SMA |
+| LC Direction Filter | ON | Master switch; require a ready matching classification |
+| Neighbor Count | 8; range 1–100 | Maximum retained votes |
+| Maximum Training History | 2,000 bars; range 100–5,000 | Rolling candidate/history window |
+| Feature Slots / Training Label Source | 5 / close | Considered features and four-bar label input |
+| ML Prediction Filter / Minimum Net Votes | ON / 1 | Long score ≥ threshold; short score ≤ negative threshold |
+| EMA Entry Filter | ON / 200 | Long close above EMA; short below |
+| SMA Entry Filter | ON / 200 | Long close above SMA; short below |
 
-Turn off **LC Direction, ML Prediction, EMA Entry and SMA Entry** to restore V3 entry rules. LC master OFF also bypasses its ML prediction check. These filters gate entries; V3's exits are unchanged. New table rows show direction, votes, neighbor usage and moving-average states. [V4 usage and model details](KAIROS_V4_Usage.md) explain labels, history bounds, warmup and tests. Profitability improvements have not been established.
+LC master OFF bypasses both LC and its ML vote check. EMA/SMA remain independently switchable. Turn off LC, EMA and SMA to restore V3 entry conditions. A vote threshold cannot exceed neighbor count when its check is active. Equal close/average passes neither direction; missing data blocks only enabled filters.
 
-## Inherited parameters
+## How KAIROS takes trades
 
-V4 retains these V3 defaults. The configured QuantConnect preset remains a **V3 port**, independent of V4 filters and saved TradingView inputs.
+All enabled checks must agree on the **kernel-flip bar**:
 
-| Parameter | Pine V4 inherited default | QuantConnect V3 preset |
+| Check | Long | Short |
 | --- | --- | --- |
-| Instrument / signal interval | Chart symbol / interval | SPY / 3 minutes |
-| Session / timezone | 09:30–before 15:00 / America/New_York | Same; DST aware |
-| Longs / shorts / session close | ON / ON / ON | Same |
-| Opposite kernel-flip exit | ON | OFF; qualified reversals enabled |
-| Kernel source / lookback / relative weight | Close / 8 / 8.0 | Same |
-| Regression Level | 25; library `_startAtBar` | Same |
-| Enhanced smoothing / lag | OFF / 5 | ON / 6 |
-| Slope filter / lookback / ATR / minimum | ON / 2 / 14 / 0.05 ATR | OFF; same thresholds |
-| Require VP / confirmation window | ON / 0 bars | ON / 10 signal bars |
-| VP fast / slow ATR | 5 / 20 | Same |
-| Minimum ATR ratio / range-to-ATR | 1.10 / 1.25 | Same |
-| Volume SMA / minimum volume ratio | 20 / 1.50 | Same |
-| Minimum VP score | 2 of 3 | Same |
-| Minimum body-to-ATR / body-to-range | 0.80 / 0.65 | Same |
-| Bull / bear close location | ≥0.70 / ≤0.30 | Same |
-| Profit / Stop enabled; risk ATR | ON; 14 | Same |
-| Stop ATR multiple / target R | 1.0 / 2.0R | 1.5 / 0.45R |
-| Entry size | 1 share/contract; editable | $2,500 option-premium budget |
-| Cash cap / amount | ON / $500 USD | OFF / $500 inactive |
-| Loss box | Visible; bottom left | Chart display omitted |
+| Direction enabled | Enable Longs | Enable Shorts |
+| Kernel trigger | Newly bullish state | Newly bearish state |
+| Session | Bar close inside entry window | Same |
+| Slope | Normalized kernel slope ≥ minimum | Slope ≤ negative minimum |
+| VP | Qualifying bullish push | Qualifying bearish push |
+| LC / ML | Long classification and sufficient positive votes | Short classification and sufficient negative votes |
+| EMA / SMA | Close above each enabled average | Close below each enabled average |
+| Position / size | Flat or short; feasible quantity | Flat or long; feasible quantity |
 
-A zero VP window requires the flip candle's push; 10 looks backward rather than delaying entry. Pine quantity overrides Properties sizing and rounds down to the symbol minimum. Cash protection works with Profit / Stop disabled; hiding its box leaves protection enabled. An infeasible one-tick cash stop blocks entry. Cash tightening preserves the ATR-based target; gaps/slippage/fees can exceed the cap.
+A rejected flip does not become a pending entry. ML or average changes alone do not trigger trades or exits. No same-direction pyramiding is allowed; a qualified opposite entry closes the old direction and opens the requested new quantity.
 
-## Metrics and controls
+VP awards one point each for ATR expansion, candle-range expansion and volume expansion, then checks directional candle body and close location. The matching push must fall within the backward-looking confirmation window and be newer than the opposing push. At the default score of 2, ATR and range alone can qualify: **volume expansion is not independently mandatory**.
 
-V4's trade table retains actual TradingView `strategy.*` results:
+V4 uses **chart-timeframe VP and fixed targets**. [V2](KAIROS_V2_Usage.md) separately contains adaptive partial profits and one-minute continuation checks.
 
-| Metric | Calculation / meaning |
+## Inherited strategy parameters
+
+| Setting | Pine V4 default |
+| --- | --- |
+| Trading session / timezone | 09:30–before 15:00 / America/New_York; intraday charts |
+| Longs / shorts / opposite-flip exit / session close | All ON |
+| Kernel source / lookback / relative weighting | Close / 8 / 8.0 |
+| Regression Level | 25; passed to KernelFunctions' `_startAtBar` |
+| Enhanced Smoothing / lag | OFF / 5; Gaussian bandwidth `max(1, lookback − lag)` |
+| Slope filter / lookback / ATR / minimum | ON / 2 bars / 14 / 0.05 ATR |
+| Require VP / confirmation window | ON / 0 bars; push on flip candle |
+| VP fast / slow ATR | 5 / 20 |
+| Minimum ATR ratio / range-to-ATR | 1.10 / 1.25 |
+| Volume SMA / minimum volume ratio | 20 / 1.50 |
+| Minimum VP score | 2 of 3 |
+| Minimum body-to-ATR / body-to-range | 0.80 / 0.65 |
+| Bull / bear close location | ≥0.70 / ≤0.30 |
+| Profit / Stop / risk ATR | ON / 14 |
+| Stop ATR multiple / target | 1.0 / 2.0R |
+| Entry quantity | 1 share/contract; editable |
+| Maximum Cash Loss / amount / box | ON / $500 USD / visible, bottom left |
+
+## Position protection and exits
+
+After a fill, `1R = risk ATR × stop multiple`. The target is entry price ± `1R × target R`; the ATR stop is one R away. Cash protection converts the configured account-currency loss into a price distance using **actual filled quantity**, symbol point value and tick size. The tighter ATR/cash stop and target share one exit bracket. Tightening the cash stop leaves the ATR-based target unchanged.
+
+Quantity overrides Properties sizing and rounds down to the symbol minimum. An infeasible one-tick cash stop blocks entry. Cash protection works with Profit / Stop disabled; hiding the loss box does not disable it. Gaps, slippage and fees can exceed the configured cap.
+
+An opposite kernel flip reverses only when the opposite entry qualifies; otherwise the optional opposite-flip exit closes the trade. Optional session close liquidates at the first bar closing at/after cutoff. ML/EMA/SMA do not add exit rules.
+
+## Metrics, appearance and alerts
+
+The table uses executed TradingView `strategy.*` results:
+
+| Metric | Meaning |
 | --- | --- |
 | Closed trades; wins/losses/breakevens | Executed outcomes |
 | Win rate / profit factor | Wins ÷ closed trades; gross profit ÷ absolute gross loss |
 | Net profit / net return | Net P/L; net P/L ÷ initial capital |
 | Average trade / maximum drawdown | Net P/L ÷ closed trades; maximum equity drawdown |
-| Position / target | Current direction and configured R target |
+| Position / target | Current direction and configured R |
+| LC / votes / neighbors / averages | Current classification, raw vote score, model usage and filter states |
 
-The navy/gold theme includes kernel/VP markers, stop/target lines and a loss box displaying quantity, open P/L and effective stop exposure. Table fonts and bottom watermark text, size, family and color are editable.
+Kernel/VP markers, stop/target lines and the loss box are configurable. Table fonts and bottom watermark text, size, font family and color are editable.
 
-Use **Order fills** alerts for order messages; include **alert() function calls** for optional filled-entry notifications, which can duplicate entry messages. Recreate alerts after changes. Pine uses `process_orders_on_close=true` and `calc_on_order_fills=true`; review simulated fills, fees and slippage in Strategy Tester.
+Use **Order fills** alerts for V4 order messages. Including **alert() function calls** adds optional filled-entry notifications and can duplicate entry messages. Long/short notification switches are separate. Recreate alerts after code or settings changes.
 
-## QuantConnect V3: 0DTE options
+## Note on "repainting"
 
-The [Python port](quantconnect/kairos_v3_spy_3min_backtest.py) buys closest-ATM **same-day-expiry SPY calls** on bullish signals and **puts** on bearish signals, within a $2,500 premium budget. Missing eligible contracts/quotes skips entry. Signals use 3-minute bars; exits observe one-minute SPY closes.
+The supplied background describes **JDE's original indicator** as follows:
 
-The preset's `0.45R` target equals `0.675 × SPY ATR(14)`: **an underlying-price threshold, not an option-premium return**. Test window: **2025-10-07–2026-10-06**; initial cash **$100,000**. The recorded cloud run used shares mode; corrected options-mode historical performance remains unverified. See [backtest details](quantconnect/KAIROS_V3_BACKTEST.md).
+> To be clear, once a bar has closed, this indicator will NOT repaint. This is true for both the ML predictions and the Kernel estimate.
 
-## Use and attribution
+**For KAIROS V4:** the LC update path requires confirmed chart bars, excludes the current sample and has once-per-bar/fill-callback guards. The kernel uses current/past price inputs. However, KAIROS is a strategy with `process_orders_on_close=true` and `calc_on_order_fills=true`. [TradingView documents](https://www.tradingview.com/pine-script-docs/concepts/strategies/#calc_on_order_fills) that fill recalculations can produce historical/realtime differences and repainting after reload. The original indicator statement is therefore **not an unconditional guarantee for KAIROS trades or backtest results**.
 
-Copy [V4 Pine](KAIROS_LC_Swing_Engine_V4_JXS_918.pine) into TradingView's Pine Editor and add it to an intraday chart. Pine trades the chart symbol; the separate Python port supplies the documented options workflow.
+## Use and validation
 
-**Author:** JXS_918 · [@woi-6ix](https://github.com/woi-6ix). LC feature/distance/ANN and kernel logic adapted from **jdehorty**, under [MPL 2.0](LICENSE). [Third-party notices](THIRD_PARTY_NOTICES.md). [V3 source](KAIROS_LC_Swing_Engine_V3_JXS_918.pine) and earlier KAIROS/DELPHI versions remain available.
+Copy [V4 Pine](KAIROS_LC_Swing_Engine_V4_JXS_918.pine) into TradingView's Pine Editor and add it to a standard intraday chart. Check Strategy Tester with realistic quantity, fees and slippage. Compare enabled/disabled filters on the same data, then evaluate unseen periods.
 
+[V4 usage](KAIROS_V4_Usage.md) documents the model and source/logic tests (`python -m unittest discover -s tests -v`). These checks do not compile Pine, validate live non-repainting behavior or establish improved profitability.
+
+## Separate QuantConnect V3 options port
+
+The [Python options port](quantconnect/kairos_v3_spy_3min_backtest.py) remains **V3**, without V4 ML filters. It buys closest-ATM same-day SPY calls/puts with a $2,500 premium budget, using 3-minute signals and one-minute SPY exit checks.
+
+Its preset differs from Pine: smoothing ON/lag 6, slope OFF, VP window 10, opposite-flip exit OFF, stop 1.5× ATR, target 0.45R, cash cap OFF. Corrected options-mode performance remains unverified. See [backtest settings and results](quantconnect/KAIROS_V3_BACKTEST.md).
+
+## Attribution
+
+**Author:** JXS_918 · [@woi-6ix](https://github.com/woi-6ix). LC feature/distance/ANN logic and [KernelFunctions/2](https://www.tradingview.com/script/e0Ek9x99-KernelFunctions/) adapted from **jdehorty**, under [MPL 2.0](LICENSE). [Third-party notices](THIRD_PARTY_NOTICES.md). [V3 source](KAIROS_LC_Swing_Engine_V3_JXS_918.pine) and earlier KAIROS/DELPHI versions remain available.
