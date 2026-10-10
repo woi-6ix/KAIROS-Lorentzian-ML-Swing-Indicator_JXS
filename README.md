@@ -7,41 +7,60 @@
 
 **KAIROS V4 is a TradingView strategy** combining Nadaraya–Watson kernel swing triggers with optional Lorentzian Classification (LC), ML vote confirmation and EMA/SMA entry filters. It retains V3's slope/Volatility Push (VP), fixed ATR exits, editable shares, cash loss control, session, alerts and navy/gold theme.
 
+**Inspiration:** KAIROS was inspired by **jdehorty's open-source Lorentzian Classification and kernel regression code**. JXS_918 adapted that foundation into this strategy's entry confirmations, position protection, session controls and presentation. Original work and supporting sources are linked under References.
+
 **Why Kairos?** Kairos personifies the opportune moment in Greek mythology. The name reflects waiting until the kernel's direction, enabled confirmations and trading hours align.
 
-## Background: Lorentzian Classification and kernel regression
+## Overview: how the machine learning works
 
-[Jdehorty's Lorentzian Classification](https://www.tradingview.com/script/WhBzgfDu-Machine-Learning-Lorentzian-Classification/) compares historical RSI, WaveTrend, CCI and ADX features using approximate neighbor classification. Its distance is:
+**Machine learning (ML)** here means classifying today's market state using stored historical examples. Each bar becomes a **feature vector**: a list of normalized indicator readings describing momentum, price deviation and trend strength. A **label** is the directional value attached to a historical example.
+
+**Nearest-neighbor classification** compares a new feature vector with historical vectors, finds similar examples and combines their labels. In conventional **k-nearest neighbors (kNN)**, `k` is the number of closest examples used for voting. “Near” refers to similarity in indicator readings, not simply nearby dates. Feature normalization helps prevent an indicator's larger numerical scale from dominating the comparison. [1]
+
+### Euclidean distance versus LC distance
+
+**Euclidean distance** measures straight-line separation between feature vectors. It squares each feature difference, adds those squares and takes the square root. Large differences can dominate the resulting distance. [2]
+
+KAIROS's **Lorentzian Classification (LC)** uses a logarithmic distance instead. For each enabled normalized feature, let `difference = current value − historical value`:
 
 ```text
-distance = sum(log(1 + abs(current feature - historical feature)))
+Euclidean: sqrt(sum(difference²))
+LC:        sum(log(1 + abs(difference)))
 ```
 
-The logarithm compresses large feature differences, reducing their contribution relative to an uncompressed distance. JDE's event-driven “price-time” analogy motivates handling noise and outliers. KAIROS compares features; it does not ingest news or event schedules.
+The logarithm compresses large differences, changing which historical states look similar. The motivation is to limit the influence of unusual readings during noisy markets or major events. The original LC overview's “price-time” analogy describes this motivation; KAIROS itself uses indicator values rather than news or event schedules. This metric choice does not establish superior trading performance. [3]
 
-[Nadaraya–Watson regression](https://www.tradingview.com/script/AWNvbPRM-Nadaraya-Watson-Rational-Quadratic-Kernel-Non-Repainting/) estimates price as a weighted average: `sum(weight × price) / sum(weight)`. KAIROS uses JDE's Rational Quadratic kernel to identify swings. Normally, a rising estimate is bullish and a falling estimate bearish. Optional Enhanced Smoothing instead compares a Gaussian estimate with the Rational Quadratic estimate. **The kernel flip triggers a trade; LC confirms it.**
+### Approximate neighbors in KAIROS
+
+KAIROS uses **approximate nearest neighbors (ANN)**: a chronological candidate scan with a moving acceptance threshold and persistent vote queue. Its Neighbor Count controls retained votes. It does not sort the history to select the exact `k` smallest distances. The implementation and labels are explained below. Historical feature comparisons produce the ML score, which confirms a kernel trigger.
+
+### Nadaraya–Watson kernel regression
+
+The kernel estimates price through a weighted average: `sum(weight × price) / sum(weight)`. Rational Quadratic weights smooth price across past observations; a rising estimate is bullish and a falling estimate bearish. Optional Enhanced Smoothing compares Gaussian and Rational Quadratic estimates to determine direction. **The kernel flip triggers a trade; LC confirms it.** This price estimator and the feature-based classifier perform separate jobs. [4]
 
 ## ML features and prediction
 
-Features are normalized through JDE's `MLExtensions/2`. Each slot has an independent Enable checkbox, feature selector and editable parameters.
+Features are normalized through the imported `MLExtensions/2` library. Each slot has an independent Enable checkbox, feature selector and editable parameters.
 
 | Slot | Default feature | A / B | Information represented |
 | --- | --- | --- | --- |
-| 1 | RSI | 14 / 1 | Momentum |
+| 1 | Relative Strength Index (RSI) | 14 / 1 | Momentum |
 | 2 | WaveTrend (WT) | 10 / 11 | Smoothed momentum |
-| 3 | CCI | 20 / 1 | Price deviation / momentum |
-| 4 | ADX | 20 / 2 | Trend strength; B ignored |
+| 3 | Commodity Channel Index (CCI) | 20 / 1 | Price deviation / momentum |
+| 4 | Average Directional Index (ADX) | 20 / 2 | Trend strength; B ignored |
 | 5 | RSI | 9 / 1 | Faster momentum |
 
 **Feature Slots to Consider** uses the first N slots and their Enable switches. Different RSI settings create distinct features. LC requires at least one active feature.
 
-V4 searches prior samples within a bounded rolling history. Its JDE-style chronological ANN loop accepts distances against a moving threshold, skips historical bar indices divisible by four and retains a bounded vote queue. This is an approximate persistent search, rather than a sorted exact k-nearest-neighbor search; samples can be revisited.
+V4 searches prior samples within a bounded rolling history. Its chronological ANN loop accepts distances against a moving threshold, skips historical bar indices divisible by four and retains a bounded vote queue. This is an approximate persistent search, rather than a sorted exact k-nearest-neighbor search; samples can be revisited.
 
-The published JDE label convention is retained: `source[4] < source` gives **−1**, `source[4] > source` gives **+1**, equality gives **0**. These labels use a known historical four-bar comparison, not a newly constructed future-return target. The current sample is added **after** prediction, so it cannot vote on itself.
+The original LC label convention is retained: `source[4] < source` gives **−1**, `source[4] > source` gives **+1**, equality gives **0**. These labels use a known historical four-bar comparison, not a newly constructed future-return target. The current sample is added **after** prediction, so it cannot vote on itself.
 
-Votes sum to the ML score: positive classifies long, negative short, zero retains direction. ML Prediction confirmation blocks zero/insufficient votes. LC requires completed warmup and a full vote queue. **Vote strength** is `abs(net votes) / votes used × 100`, not a probability of profit.
+Votes sum to the ML score: positive classifies long, negative short, zero retains direction. For example, six +1 votes and two −1 votes produce a score of +4. ML Prediction confirmation blocks zero/insufficient votes. LC requires completed warmup and a full vote queue. **Vote strength** is `abs(net votes) / votes used × 100`, not a probability of profit.
 
 ## Switches and ML defaults
+
+**EMA** is an exponential moving average, weighting recent prices more heavily; **SMA** is a simple moving average of the selected number of closes. Both filters compare price with an average; they are separate from the ML vote threshold.
 
 | Section / setting | Default | Effect |
 | --- | --- | --- |
@@ -72,7 +91,11 @@ All enabled checks must agree on the **kernel-flip bar**:
 
 A rejected flip does not become a pending entry. ML or average changes alone do not trigger trades or exits. No same-direction pyramiding is allowed; a qualified opposite entry closes the old direction and opens the requested new quantity.
 
-VP awards one point each for ATR expansion, candle-range expansion and volume expansion, then checks directional candle body and close location. The matching push must fall within the backward-looking confirmation window and be newer than the opposing push. At the default score of 2, ATR and range alone can qualify: **volume expansion is not independently mandatory**.
+### VP: Volatility Push
+
+**VP means Volatility Push**: the strategy's confirmation of a strong directional candle during expanding market activity. **ATR (Average True Range)** measures recent price movement and provides the scale for its range/body tests.
+
+VP awards one point each for fast/slow ATR expansion, candle range relative to slow ATR, and volume relative to its moving average. A bullish push also requires an up candle, sufficient body size and a close near its high; a bearish push requires the opposite. The matching push must fall within the backward-looking confirmation window and be newer than the opposing push. At the default score of 2, ATR and range alone can qualify: **volume expansion is not independently mandatory**.
 
 V4 uses **chart-timeframe VP and fixed targets**. [V2](KAIROS_V2_Usage.md) separately contains adaptive partial profits and one-minute continuation checks.
 
@@ -125,7 +148,7 @@ Use **Order fills** alerts for V4 order messages. Including **alert() function c
 
 ## Note on "repainting"
 
-The supplied background describes **JDE's original indicator** as follows:
+The supplied wording for **the original LC indicator** states [3]:
 
 > To be clear, once a bar has closed, this indicator will NOT repaint. This is true for both the ML predictions and the Kernel estimate.
 
@@ -143,6 +166,18 @@ The [Python options port](quantconnect/kairos_v3_spy_3min_backtest.py) remains *
 
 Its preset differs from Pine: smoothing ON/lag 6, slope OFF, VP window 10, opposite-flip exit OFF, stop 1.5× ATR, target 0.45R, cash cap OFF. Corrected options-mode performance remains unverified. See [backtest settings and results](quantconnect/KAIROS_V3_BACKTEST.md).
 
-## Attribution
+## Author and license
 
-**Author:** JXS_918 · [@woi-6ix](https://github.com/woi-6ix). LC feature/distance/ANN logic and [KernelFunctions/2](https://www.tradingview.com/script/e0Ek9x99-KernelFunctions/) adapted from **jdehorty**, under [MPL 2.0](LICENSE). [Third-party notices](THIRD_PARTY_NOTICES.md). [V3 source](KAIROS_LC_Swing_Engine_V3_JXS_918.pine) and earlier KAIROS/DELPHI versions remain available.
+**Author:** JXS_918 · [@woi-6ix](https://github.com/woi-6ix). Adapted code is covered by [MPL 2.0](LICENSE); see [third-party notices](THIRD_PARTY_NOTICES.md). [V3 source](KAIROS_LC_Swing_Engine_V3_JXS_918.pine) and earlier KAIROS/DELPHI versions remain available.
+
+## References
+
+1. **scikit-learn:** [Nearest Neighbors](https://scikit-learn.org/stable/modules/neighbors.html) — feature-space similarity, kNN and classification by neighbor votes.
+2. **SciPy:** [Euclidean distance](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.euclidean.html) — mathematical definition of the comparison metric.
+3. **jdehorty:** [Machine Learning: Lorentzian Classification](https://www.tradingview.com/script/WhBzgfDu-Machine-Learning-Lorentzian-Classification/) — original inspiration, logarithmic feature distance, feature engineering and ANN logic.
+4. **jdehorty:** [Nadaraya–Watson Rational Quadratic Kernel](https://www.tradingview.com/script/AWNvbPRM-Nadaraya-Watson-Rational-Quadratic-Kernel-Non-Repainting/) and [KernelFunctions](https://www.tradingview.com/script/e0Ek9x99-KernelFunctions/) — kernel estimator and imported functions.
+5. **Kerimbekov, Bilge & Uğurlu (2016):** [The use of Lorentzian distance metric in classification problems](https://doi.org/10.1016/j.patrec.2016.09.006).
+6. **Kerimbekov & Bilge (2017):** [Lorentzian Distance Classifier for Multiple Features](https://www.scitepress.org/Papers/2017/61970/) — DOI: 10.5220/0006197004930501.
+7. **TradingView:** [Pine strategies and order-fill recalculation](https://www.tradingview.com/pine-script-docs/concepts/strategies/#calc_on_order_fills) — execution and backtest behavior.
+
+The research papers provide broader classification background; their methods and datasets are not a validation of KAIROS's logarithmic distance, trading rules or profitability.
